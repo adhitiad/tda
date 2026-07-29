@@ -5,14 +5,109 @@ Tracks Smart Money flows, CEX transparency, and liquidation events.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
+import time
+from enum import Enum
 from typing import Any
 
 import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
 logger = logging.getLogger("smart_money")
+
+
+class CircuitState(Enum):
+    CLOSED = "closed"
+    OPEN = "open"
+    HALF_OPEN = "half_open"
+
+
+class CircuitBreaker:
+    """Circuit breaker for external API calls with timeout and cache fallback."""
+
+    def __init__(
+        self,
+        failure_threshold: int = 3,
+        recovery_timeout: float = 30.0,
+        request_timeout: float = 2.0,
+    ) -> None:
+        self.failure_threshold = failure_threshold
+        self.recovery_timeout = recovery_timeout
+        self.request_timeout = request_timeout
+        self._failures = 0
+        self._state = CircuitState.CLOSED
+        self._last_failure_time = 0.0
+        self._cache: dict[str, Any] = {}
+
+    @property
+    def is_open(self) -> bool:
+        if self._state == CircuitState.OPEN:
+            if time.time() - self._last_failure_time >= self.recovery_timeout:
+                self._state = CircuitState.HALF_OPEN
+                return False
+            return True
+        return False
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._state = CircuitState.CLOSED
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        self._last_failure_time = time.time()
+        if self._failures >= self.failure_threshold:
+            self._state = CircuitState.OPEN
+
+    def get_cached(self, key: str) -> Any | None:
+        return self._cache.get(key)
+
+    def set_cache(self, key: str, value: Any) -> None:
+        self._cache[key] = value
+
+    async def call(
+        self,
+        key: str,
+        func,
+        *args,
+        **kwargs,
+    ) -> Any:
+        if self.is_open:
+            logger.warning(
+                f"[CircuitBreaker] Circuit OPEN for {key}. "
+                f"Returning cached data or empty response."
+            )
+            cached = self.get_cached(key)
+            if cached is not None:
+                return cached
+            return {}
+
+        try:
+            result = await asyncio.wait_for(
+                func(*args, **kwargs),
+                timeout=self.request_timeout,
+            )
+            self.record_success()
+            self.set_cache(key, result)
+            return result
+        except asyncio.TimeoutError:
+            self.record_failure()
+            logger.warning(
+                f"[CircuitBreaker] Timeout for {key} after "
+                f"{self.request_timeout}s. Returning cached or empty."
+            )
+            cached = self.get_cached(key)
+            if cached is not None:
+                return cached
+            return {}
+        except Exception as e:
+            self.record_failure()
+            logger.warning(f"[CircuitBreaker] Failure for {key}: {e}")
+            cached = self.get_cached(key)
+            if cached is not None:
+                return cached
+            return {}
 
 
 class SmartMoneyTracker:
@@ -22,6 +117,11 @@ class SmartMoneyTracker:
         self.coinglass_api_key = coinglass_api_key
         self.defillama_base = "https://api.llama.fi"
         self.coinglass_base = "https://open-api.coinglass.com"
+        self.circuit_breaker = CircuitBreaker(
+            failure_threshold=3,
+            recovery_timeout=30.0,
+            request_timeout=2.0,
+        )
 
     # ------------------------------------------------------------------
     # DefiLlama: CEX Transparency
@@ -35,7 +135,7 @@ class SmartMoneyTracker:
         # DefiLlama stablecoins endpoint (free, no auth)
         url = "https://api.llama.fi/stablecoins"
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=2.0) as client:
                 resp = await client.get(url)
                 resp.raise_for_status()
                 data = resp.json()
@@ -85,7 +185,7 @@ class SmartMoneyTracker:
         headers = {"accept": "application/json", "CG-API-KEY": self.coinglass_api_key}
         params = {"symbol": symbol}
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=2.0) as client:
                 resp = await client.get(url, headers=headers, params=params)
                 resp.raise_for_status()
                 data = resp.json()
@@ -125,7 +225,7 @@ class SmartMoneyTracker:
         headers = {"accept": "application/json", "CG-API-KEY": self.coinglass_api_key}
         params = {"symbol": symbol, "time_type": "h4"}
         try:
-            async with httpx.AsyncClient(timeout=15) as client:
+            async with httpx.AsyncClient(timeout=2.0) as client:
                 resp = await client.get(url, headers=headers, params=params)
                 resp.raise_for_status()
                 data = resp.json()
@@ -231,11 +331,55 @@ class SmartMoneyTracker:
     async def get_smart_money_snapshot(self, symbol: str = "BTC") -> dict[str, Any]:
         """
         Compile a full smart money snapshot from all sources.
+        Uses circuit breaker for fault tolerance and cache fallback.
+        Overall timeout of 5 seconds to prevent pipeline blocking.
         """
-        cex_data = await self.fetch_cex_transparency()
-        oi_data = await self.fetch_open_interest(symbol)
-        liq_data = await self.fetch_liquidations(symbol)
-        whale_data = await self.scrape_whale_alert_rss()
+        try:
+            return await asyncio.wait_for(
+                self._get_smart_money_snapshot_impl(symbol),
+                timeout=5.0,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                f"[SmartMoney] Snapshot for {symbol} timed out after 5s. "
+                f"Returning cached data or empty response."
+            )
+            cached = self.circuit_breaker.get_cached(f"cex_{symbol}")
+            if cached is not None:
+                return cached
+            return {
+                "cex_transparency": {"signal": "NEUTRAL"},
+                "open_interest": {"signal": "NEUTRAL"},
+                "liquidations": {"signal": "NEUTRAL"},
+                "whale_alerts": {"total_btc_inflow_large": 0.0, "transactions": []},
+                "composite_signal": "NEUTRAL",
+            }
+
+    async def _get_smart_money_snapshot_impl(self, symbol: str = "BTC") -> dict[str, Any]:
+        """
+        Compile a full smart money snapshot from all sources.
+        Uses circuit breaker for fault tolerance and cache fallback.
+        """
+        cb = self.circuit_breaker
+
+        cex_data = await cb.call(
+            f"cex_{symbol}",
+            self.fetch_cex_transparency,
+        )
+        oi_data = await cb.call(
+            f"oi_{symbol}",
+            self.fetch_open_interest,
+            symbol,
+        )
+        liq_data = await cb.call(
+            f"liq_{symbol}",
+            self.fetch_liquidations,
+            symbol,
+        )
+        whale_data = await cb.call(
+            f"whale_{symbol}",
+            self.scrape_whale_alert_rss,
+        )
 
         # Classify signals
         btc_inflow_threshold = 2000.0  # BTC

@@ -1,28 +1,14 @@
 data:
-  exchange_id: "okx"
+  exchange_id: "idx"
   symbols:
-    - "BTC/USDT:USDT"
-    - "ETH/USDT:USDT"
-    - "BNB/USDT:USDT"
-    - "SOL/USDT:USDT"
-    - "XRP/USDT:USDT"
-    - "DOGE/USDT:USDT"
-    - "ADA/USDT:USDT"
-    - "AVAX/USDT:USDT"
-    - "DOT/USDT:USDT"
-    - "MATIC/USDT:USDT"
+    - "IHSG"
+    - "LQ45"
+    - "IDX30"
   yfinance_ticker:
-    - "BTC-USD"
-    - "ETH-USD"
-    - "BNB-USD"
-    - "SOL-USD"
-    - "XRP-USD"
-    - "DOGE-USD"
-    - "ADA-USD"
-    - "AVAX-USD"
-    - "DOT-USD"
-    - "MATIC-USD"
-  yfinance_period: "10y"
+    - "^JKSE"
+    - "HMSP.JK"
+    - "IHSG.JK"
+  yfinance_period: "5y"
   timeframes:
     - m15
     - m30
@@ -39,20 +25,25 @@ websocket:
 
 market_data:
   orderbook:
-    enabled: true
+    enabled: false
     limit: 100
   funding_rate:
-    enabled: true
+    enabled: false
   open_interest:
-    enabled: true
+    enabled: false
 
 trading:
   dry_run: true
   auto_start: true
   training_schedule:
-    day: "sunday"
+    day: "saturday"
     time: "02:00"
   max_symbols: 10
+  market_hours:
+    enabled: true
+    timezone: "Asia/Jakarta"
+    open_time: "08:00"
+    close_time: "17:00"
 
 indicators:
   ema_periods: [20, 50, 200]
@@ -106,8 +97,8 @@ ml:
     - regime_trending
     - adx
     - bid_ask_imbalance
-    - funding_rate
-    - open_interest
+    - pe_ratio
+    - pbv_ratio
 
 model:
   type: "ensemble"
@@ -201,7 +192,7 @@ paths:
   models_dir: "models"
   logs_dir: "logs"
   backtest_dir: "backtests"
-  config_file: "config.yaml"
+  config_file: "config_idx.yaml"
 
 database:
   url: "postgresql://tsdbadmin:s2dwhnbud1st0rh9@so5wjutc9k.ttn10x5osk.tsdb.cloud.timescale.com:31621/tsdb?sslmode=require"
@@ -287,64 +278,14 @@ risk_management:
   max_risk_per_trade: 0.05
 
 telegram_bot:
-  enabled: ${TELEGRAM_BOT_ENABLED:-false}
-  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  enabled: false
+  bot_token: ""
   polling_interval: 1.0
   max_retries: 3
   retry_delay_seconds: 5
-  groups:
-    - group_id: "${TELEGRAM_GROUP_FREE_BTC_ETH}"
-      name: "Free - BTC & ETH Only"
-      tier: "free"
-      asset_type: "crypto"
-      allowed_symbols:
-        - "BTC"
-        - "ETH"
-      max_signals_per_hour: 3
-      max_messages_per_minute: 10
-      cooldown_minutes_per_symbol: 15
-      burst_window_minutes: 5
-      burst_max_count: 3
-    - group_id: "${TELEGRAM_GROUP_FREE_ALL_CRYPTO}"
-      name: "Free - All Crypto"
-      tier: "free"
-      asset_type: "crypto"
-      allowed_symbols: []
-      max_signals_per_hour: 5
-      max_messages_per_minute: 10
-      cooldown_minutes_per_symbol: 15
-      burst_window_minutes: 5
-      burst_max_count: 3
-    - group_id: "${TELEGRAM_GROUP_PRO_CRYPTO_FOREX}"
-      name: "Pro - All Crypto & Forex"
-      tier: "pro"
-      asset_type: "crypto_forex"
-      allowed_symbols: []
-      max_signals_per_hour: 8
-      max_messages_per_minute: 15
-      cooldown_minutes_per_symbol: 10
-      burst_window_minutes: 5
-      burst_max_count: 5
-    - group_id: "${TELEGRAM_GROUP_PRO_INDO_IDX}"
-      name: "Pro - Indo Sham Idx"
-      tier: "pro"
-      asset_type: "crypto_idx"
-      allowed_symbols:
-        - "IHSG"
-        - "LQ45"
-        - "IDX30"
-      max_signals_per_hour: 6
-      max_messages_per_minute: 15
-      cooldown_minutes_per_symbol: 10
-      burst_window_minutes: 5
-      burst_max_count: 5
-    - group_id: "${TELEGRAM_GROUP_ENTERPRISE}"
-      name: "Enterprise - Crypto, Forex & Saham Idx"
-      tier: "enterprise"
-      asset_type: "crypto_forex_idx"
-      allowed_symbols: []
-      max_signals_per_hour: 15
-      max_messages_per_minute: 20
-      cooldown_minutes_per_symbol: 5
-      burst_window_minutes: 5
-      burst_max_count: 8
+  groups: []
+  signal:
+    include_disclaimer: true
+    disclaimer_text: "⚠ Ini adalah analisis teknikal, bukan nasihat investasi. Gunakan dengan risiko Anda sendiri."
+    timezone: "Asia/Jakarta"
+    timestamp_format: "%Y-%m-%d %H:%M:%S WIB"

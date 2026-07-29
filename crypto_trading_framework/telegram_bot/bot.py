@@ -155,6 +155,7 @@ class TelegramBot:
                 risk_reward=0.0,
                 tier=group.tier.value,
                 win_rate=win_rate_val,
+                current_price=signal_data.get("current_price", 0.0),
             )
         return ""
 

@@ -422,6 +422,7 @@ async def _process_coin(symbol: str, config: dict) -> None:
                         logger.exception("[Quantuis] Error during smart money veto evaluation")
 
                 if vetoed:
+                    current_price = df["close"].tail(1).item()
                     current_signals[symbol] = {
                         "direction": signal.get("direction", "LONG"),
                         "action": "HOLD",
@@ -432,6 +433,7 @@ async def _process_coin(symbol: str, config: dict) -> None:
                         "probability": signal.get("probability", "0%"),
                         "probability_float": signal.get("probability_float", 0.0),
                         "entry_zone": [signal.get("entry", 0.0)],
+                        "current_price": current_price,
                         "take_profit": [signal.get("take_profit", 0.0)],
                         "stop_loss_atr": signal.get("stop_loss", 0.0),
                         "trailing_step_atr": signal.get("trailing_step_atr", 0.0),
@@ -459,6 +461,7 @@ async def _process_coin(symbol: str, config: dict) -> None:
                                     "action": "HOLD",
                                     "entry": entry_zone[0] if isinstance(entry_zone, list) else entry_zone,
                                     "entry_zone": entry_zone,
+                                    "current_price": current_price,
                                     "take_profit": take_profit if isinstance(take_profit, list) else [take_profit],
                                     "stop_loss_atr": stop_loss,
                                     "stop_loss": stop_loss,
@@ -488,6 +491,7 @@ async def _process_coin(symbol: str, config: dict) -> None:
                     tp_price = signal.get("take_profit", 0.0)
                     sl_pct = abs(entry_price - sl_price) / entry_price if entry_price > 0 else 0.0
                     tp_pct = abs(tp_price - entry_price) / entry_price if entry_price > 0 else 0.0
+                    current_price = df["close"].tail(1).item()
 
                     current_signals[symbol] = {
                         "direction": signal.get("direction", "LONG"),
@@ -499,6 +503,7 @@ async def _process_coin(symbol: str, config: dict) -> None:
                         "probability": signal.get("probability", "0%"),
                         "probability_float": signal.get("probability_float", 0.0),
                         "entry_zone": [signal.get("entry", 0.0)],
+                        "current_price": current_price,
                         "take_profit": [tp_price],
                         "stop_loss_atr": sl_price,
                         "trailing_step_atr": signal.get("trailing_step_atr", 0.0),
@@ -537,6 +542,7 @@ async def _process_coin(symbol: str, config: dict) -> None:
                                     "action": cs.get("action", "BUY"),
                                     "entry": entry_zone[0] if isinstance(entry_zone, list) else entry_zone,
                                     "entry_zone": entry_zone,
+                                    "current_price": current_price,
                                     "take_profit": take_profit if isinstance(take_profit, list) else [take_profit],
                                     "stop_loss_atr": stop_loss,
                                     "stop_loss": stop_loss,
@@ -614,19 +620,26 @@ async def _process_coin(symbol: str, config: dict) -> None:
 async def _coin_monitoring_loop(config: dict) -> None:
     symbols = config.get("data", {}).get("symbols", ["BTC/USDT:USDT"])
     interval_minutes = 15
+    cycle_count = 0
     while True:
+        cycle_count += 1
         try:
-            logger.info(f"[Quantuis] Starting coin monitoring cycle for {len(symbols)} symbols")
+            logger.info(f"[Quantuis] Starting coin monitoring cycle {cycle_count} for {len(symbols)} symbols")
             for symbol in symbols:
                 try:
                     await _process_coin(symbol, config)
                 except Exception:
                     logger.exception(f"[Quantuis] Error processing {symbol} in monitoring cycle")
-            logger.info(f"[Quantuis] Monitoring cycle complete. Signals: {len(current_signals)}")
+            logger.info(f"[Quantuis] Monitoring cycle {cycle_count} complete. Signals: {len(current_signals)}")
             _log_memory_usage("End monitoring cycle")
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
+            if cycle_count % 10 == 0:
+                logger.info(f"[Quantuis] Explicit deep memory cleanup at cycle {cycle_count}")
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
         except Exception:
             logger.exception("[Quantuis] Error in monitoring cycle")
         await asyncio.sleep(interval_minutes * 60)

@@ -17,7 +17,7 @@ class SignalFormatter:
         )
         self.timezone = self.config.get("timezone", "Asia/Jakarta")
 
-    def format_entry_signal(
+def format_entry_signal(
         self,
         symbol: str,
         direction: str,
@@ -30,6 +30,7 @@ class SignalFormatter:
         risk_reward: float = 0.0,
         tier: str = "free",
         win_rate: float = 0.0,
+        current_price: float = 0.0,
     ) -> str:
         lines: list[str] = []
         lines.append(f"🔔 SINYAL {tier.upper()} — {symbol}")
@@ -37,12 +38,12 @@ class SignalFormatter:
         lines.append(f"📌 Pasangan: {symbol}")
         lines.append(f"📊 Arah: {direction}")
         lines.append(f"💰 Entry: {entry}")
+        if current_price > 0:
+            lines.append(f"📈 Harga Terkini: {current_price}")
         if len(targets) >= 1:
             lines.append(f"🎯 Target 1: {targets[0]}")
         if len(targets) >= 2:
             lines.append(f"🎯 Target 2: {targets[1]}")
-        if len(targets) >= 3:
-            lines.append(f"🎯 Target 3: {targets[2]}")
         lines.append(f"🛑 Stop Loss: {stop_loss}")
         lines.append(f"⏱ Timeframe: {timeframe}")
         if indicators:

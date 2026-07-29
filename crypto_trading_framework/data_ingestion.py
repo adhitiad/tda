@@ -218,6 +218,36 @@ class DataIngestion:
     def _normalize_symbol(self) -> str:
         return self.symbol.replace("/", "-").replace(":", "")
 
+    def fill_missing_data(self, df: pl.DataFrame, method: str = "linear") -> pl.DataFrame:
+        if df.is_empty():
+            return df
+
+        df_sorted = df.sort("timestamp")
+        ts_col = "timestamp"
+        numeric_cols = [c for c in df_sorted.columns if c != ts_col]
+
+        if not numeric_cols:
+            return df_sorted
+
+        full_range = pl.date_range(
+            low=df_sorted[ts_col].min(),
+            high=df_sorted[ts_col].max(),
+            interval="1m",
+            eager=True,
+        )
+        full_df = pl.DataFrame({ts_col: full_range})
+        merged = full_df.join(df_sorted, on=ts_col, how="left")
+
+        for col in numeric_cols:
+            if col not in merged.columns:
+                continue
+            if method == "forward_fill":
+                merged = merged.with_columns(pl.col(col).forward_fill().alias(col))
+            elif method == "linear":
+                merged = merged.with_columns(pl.col(col).interpolate().alias(col))
+
+        return merged
+
     def _validate_ohlcv(self, df: pl.DataFrame, source: str) -> pl.DataFrame | None:
         if not VALIDATION_AVAILABLE:
             return df
@@ -233,6 +263,9 @@ class DataIngestion:
 
             for warn in result.warnings:
                 logger.warning(f"[Validation] {source}: {warn}")
+
+            if not validator.allow_gaps:
+                df = self.fill_missing_data(df, method="linear")
 
             return df
         except Exception as e:

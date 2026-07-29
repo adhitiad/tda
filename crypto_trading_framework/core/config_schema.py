@@ -37,12 +37,29 @@ class TrainingScheduleConfig(BaseModel):
     time: str = "02:00"
 
 
+class MarketHoursConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    enabled: bool = False
+    timezone: str = "Asia/Jakarta"
+    open_time: str = "08:00"
+    close_time: str = "17:00"
+
+
 class TradingConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     dry_run: bool = True
     auto_start: bool = True
     training_schedule: TrainingScheduleConfig = Field(default_factory=TrainingScheduleConfig)
     max_symbols: int = 10
+    market_hours: MarketHoursConfig = Field(default_factory=MarketHoursConfig)
+
+
+class MarketHoursConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    enabled: bool = False
+    timezone: str = "Asia/Jakarta"
+    open_time: str = "08:00"
+    close_time: str = "17:00"
 
 
 class IndicatorsConfig(BaseModel):

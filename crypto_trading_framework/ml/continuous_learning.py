@@ -530,17 +530,17 @@ class FeedbackLoopEngine:
         while self._running:
             try:
                 now = _now_utc()
-                self._run_evaluation(now)
+                eval_ran = self._run_evaluation(now)
                 self._run_retrain(now)
-                self._cleanup_signal_buffer()
+                self._cleanup_signal_buffer(skip=eval_ran)
             except Exception:
                 logger.exception("[FeedbackLoop] Error in background loop")
             time.sleep(300)
 
-    def _run_evaluation(self, now: datetime) -> None:
+    def _run_evaluation(self, now: datetime) -> bool:
         evaluation_interval = timedelta(hours=self.evaluation_interval_hours)
         if self._last_evaluation is not None and (now - self._last_evaluation) < evaluation_interval:
-            return
+            return False
 
         logger.info("[FeedbackLoop] Running signal evaluation cycle...")
         self._last_evaluation = now
@@ -548,7 +548,7 @@ class FeedbackLoopEngine:
         unevaluated = self.signal_buffer.get_unevaluated_signals(max_age_hours=self.lookback_hours)
         if not unevaluated:
             logger.info("[FeedbackLoop] No unevaluated signals found.")
-            return
+            return True
 
         logger.info(f"[FeedbackLoop] Evaluating {len(unevaluated)} unevaluated signal(s)...")
         for sig in unevaluated:
@@ -563,6 +563,7 @@ class FeedbackLoopEngine:
             f"Golden memory: {self.golden_memory.get_correct_pattern_count()} correct, "
             f"{self.golden_memory.get_incorrect_pattern_count()} incorrect patterns."
         )
+        return True
 
     def _evaluate_single_signal(self, signal: dict[str, Any]) -> None:
         indicator_values = signal.get("indicator_values", {})
@@ -791,7 +792,9 @@ class FeedbackLoopEngine:
             "val_samples": len(X_seq) - split_idx,
         }
 
-    def _cleanup_signal_buffer(self) -> None:
+    def _cleanup_signal_buffer(self, skip: bool = False) -> None:
+        if skip:
+            return
         try:
             self.signal_buffer.clear_evaluated()
         except Exception:
