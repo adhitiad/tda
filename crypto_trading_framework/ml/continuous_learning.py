@@ -403,7 +403,9 @@ def _fetch_actual_price_after(
     else:
         df = df_history.sort("timestamp")
 
-    mask = df["timestamp"] > ts
+    # Make comparison timestamp timezone-naive to match Polars datetime (which is tz-naive)
+    ts_naive = ts.replace(tzinfo=None)
+    mask = df["timestamp"] > ts_naive
     future_df = df.filter(mask)
     if future_df.height == 0:
         return None
