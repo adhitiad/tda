@@ -1,0 +1,548 @@
+import asyncio
+import json
+import logging
+import random
+from datetime import datetime
+from pathlib import Path
+
+import numpy as np
+import polars as pl
+import torch
+import torch.nn as nn
+import yaml
+import joblib
+
+from crypto_trading_framework.core.logging import setup_logger
+from crypto_trading_framework.ml.backtest import Backtester
+from crypto_trading_framework.data_ingestion import DataIngestion
+from crypto_trading_framework.core.indicators import add_all_indicators
+from crypto_trading_framework.ml.ml_pipeline import MLPipeline
+from crypto_trading_framework.ml.multi_timeframe import fuse_multi_timeframe
+from crypto_trading_framework.ml.model import FocalLoss, create_model
+from crypto_trading_framework.ml.ensemble import EnsembleModel
+from crypto_trading_framework.ml.signals import generate_signal, print_signal_table
+from crypto_trading_framework.ml.rule_signals import generate_rule_based_signal
+from crypto_trading_framework.core.bot import AutomatedTradingBot
+
+
+from crypto_trading_framework.core.logging import get_logger
+from crypto_trading_framework.ml.continuous_learning import FeedbackLoopEngine
+
+
+def merge_market_data(df: pl.DataFrame, market_data: dict) -> pl.DataFrame:
+    for key, md_df in market_data.items():
+        if md_df is not None and not md_df.is_empty():
+            for col in md_df.columns:
+                if col != "timestamp" and col not in df.columns:
+                    df = df.with_columns(pl.lit(md_df[col].item()).alias(col))
+    return df
+
+
+from crypto_trading_framework.core.config_schema import validate_config
+
+
+def load_config(config_path: str = "config.yaml") -> dict:
+    """Memuat dan memvalidasi konfigurasi dari file YAML."""
+    with open(config_path, encoding="utf-8") as f:
+        raw_config = yaml.safe_load(f)
+    return validate_config(raw_config)
+
+
+from crypto_trading_framework.ml.training import (
+    evaluate_model,
+    get_class_weights,
+    get_loss_function,
+    train_model,
+)
+
+
+from crypto_trading_framework.core.checkpoint_utils import save_checkpoint
+
+
+def set_seed(seed: int = 42):
+    """Menyetel random seed untuk reproduksibilitas."""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def hyperparameter_search(
+    x_train: np.ndarray,
+    y_train: np.ndarray,
+    x_test: np.ndarray,
+    y_test: np.ndarray,
+    input_size: int,
+    device: torch.device,
+    n_trials: int = 10,
+    param_grid: dict | None = None,
+    loss_type: str = "bce",
+    model_type: str = "lstm",
+) -> tuple[dict, float]:
+    if model_type == "ensemble":
+        ensemble = EnsembleModel(input_size=input_size, device=device)
+        ensemble.fit(x_train, y_train, x_test, y_test)
+        preds = ensemble.predict(x_test)
+        acc = float(np.mean(preds == y_test))
+        return {
+            "hidden_size": 64,
+            "num_layers": 2,
+            "dropout": 0.3,
+            "lr": 0.001,
+            "epochs": 100,
+        }, acc
+
+    if param_grid is None:
+        param_grid = {
+            "hidden_size": [32, 64, 128],
+            "num_layers": [1, 2],
+            "dropout": [0.2, 0.3, 0.4],
+            "lr": [0.001, 0.0005, 0.0001],
+            "epochs": [50, 100, 150],
+        }
+
+    best_accuracy = 0.0
+    best_params: dict | None = None
+
+    for trial in range(n_trials):
+        hidden_size = random.choice(param_grid["hidden_size"])
+        num_layers = random.choice(param_grid["num_layers"])
+        dropout = random.choice(param_grid["dropout"])
+        lr = random.choice(param_grid["lr"])
+        epochs = random.choice(param_grid["epochs"])
+
+        model = create_model(
+            model_type=model_type if model_type in ["lstm", "gru", "attention_lstm", "tft"] else "lstm",
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+        ).to(device)
+
+        class_weights = get_class_weights(y_train, method="balanced")
+        loss_fn = get_loss_function(loss_type, class_weights.to(device))
+
+        model, _ = train_model(x_train, y_train, model, epochs, lr, device, loss_fn=loss_fn)
+        accuracy = evaluate_model(model, x_test, y_test, device)
+
+        if logger is not None:
+            logger.info(f"  [TRIAL {trial+1}/{n_trials}] hidden={hidden_size}, layers={num_layers}, "
+                        f"dropout={dropout}, lr={lr}, epochs={epochs} => acc={accuracy:.4f}")
+
+        if accuracy > best_accuracy:
+            best_accuracy = accuracy
+            best_params = {
+                "hidden_size": hidden_size,
+                "num_layers": num_layers,
+                "dropout": dropout,
+                "lr": lr,
+                "epochs": epochs,
+            }
+
+    if best_params is None:
+        best_params = {
+            "hidden_size": param_grid["hidden_size"][0],
+            "num_layers": param_grid["num_layers"][0],
+            "dropout": param_grid["dropout"][0],
+            "lr": param_grid["lr"][0],
+            "epochs": param_grid["epochs"][0],
+        }
+
+    return best_params, best_accuracy
+
+
+def walk_forward_validation(
+    x: np.ndarray,
+    y: np.ndarray,
+    input_size: int,
+    device: torch.device,
+    params: dict,
+    n_splits: int = 5,
+    loss_type: str = "bce",
+) -> float:
+    """
+    Walk-forward validation untuk estimasi performa yang lebih robust.
+
+    :return: Rata-rata akurasi across folds
+    """
+    pipeline = MLPipeline()
+    splits = pipeline.walk_forward_split(x, y, n_splits=n_splits)
+    accuracies: list[float] = []
+
+    for x_train, x_val, y_train, y_val in splits:
+        if len(x_train) == 0 or len(x_val) == 0:
+            continue
+
+        model = create_model(
+            model_type="lstm",
+            input_size=input_size,
+            hidden_size=params["hidden_size"],
+            num_layers=params["num_layers"],
+            dropout=params["dropout"],
+        ).to(device)
+
+        class_weights = get_class_weights(y_train, method="balanced")
+        loss_fn = get_loss_function(loss_type, class_weights.to(device))
+
+        model, _ = train_model(
+            x_train, y_train, model,
+            params["epochs"], params["lr"], device,
+            loss_fn=loss_fn,
+            early_stopping_patience=10,
+        )
+        acc = evaluate_model(model, x_val, y_val, device)
+        accuracies.append(acc)
+
+    return float(np.mean(accuracies)) if accuracies else 0.0
+
+
+def save_backtest_results(result: dict, path: str):
+    """Menyimpan hasil backtest ke JSON/Parquet."""
+    output_path = Path(path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    trades = []
+    for t in result.get("trades", []):
+        trades.append({
+            "entry_time": t.entry_time,
+            "exit_time": t.exit_time,
+            "direction": t.direction,
+            "entry_price": t.entry_price,
+            "exit_price": t.exit_price,
+            "pnl": t.pnl,
+            "pnl_pct": t.pnl_pct,
+            "result": t.result,
+        })
+
+    report = {
+        "timestamp": datetime.now().isoformat(),
+        "total_trades": result["total_trades"],
+        "wins": result["wins"],
+        "losses": result["losses"],
+        "winrate": result["winrate"],
+        "total_pnl": result["total_pnl"],
+        "return_pct": result["return_pct"],
+        "profit_factor": result["profit_factor"],
+        "max_drawdown_pct": result["max_drawdown_pct"],
+        "final_capital": result["final_capital"],
+        "total_fees": result.get("total_fees", 0),
+        "total_slippage": result.get("total_slippage", 0),
+        "trades": trades,
+    }
+
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2, default=str)
+
+    if logger is not None:
+        logger.info(f"Backtest results saved to {output_path}")
+
+
+# ==========================
+# MAIN PIPELINE
+# ==========================
+
+logger = None
+
+async def main():
+    global logger
+    set_seed(42)
+    config = load_config("config.yaml")
+
+    symbol = config["data"]["symbols"][0]
+    timeframes = config["data"]["timeframes"]
+    lookback = config["data"]["lookback"]
+    time_steps = config["ml"]["time_steps"]
+    threshold = config["signal"]["threshold"]
+    n_trials = config["hyperparameter_tuning"]["n_trials"]
+    checkpoint_dir = config["model"]["checkpoint_dir"]
+    backtest_dir = config["paths"]["backtest_dir"]
+
+    logger = setup_logger(
+        "main",
+        log_file=config["logging"]["log_file"],
+        level=getattr(logging, config["logging"]["log_level"]),
+    )
+
+    logger.info(f"[START] Mengambil data {symbol} untuk timeframe: {', '.join(timeframes)}")
+    logger.info(f"[CONFIG] lookback={lookback}, time_steps={time_steps}, threshold={threshold}, trials={n_trials}")
+
+    feedback_engine = FeedbackLoopEngine(config=config)
+    feedback_engine.start()
+
+    ingestion = DataIngestion(exchange_id=config["data"]["exchange_id"], symbol=symbol)
+    try:
+        raw_data = await ingestion.fetch_multi_timeframe(timeframes=timeframes, limit=lookback)
+    except Exception as e:
+        logger.error(f"Gagal mengambil data dari {config['data']['exchange_id']}: {e}")
+        if config["data"]["fallback_enabled"]:
+            logger.info("Mencoba yfinance sebagai fallback...")
+            raw_data = {}
+            for tf in timeframes:
+                interval_map = {"m5": "5m", "m15": "15m", "m30": "30m", "h1": "1h", "h4": "4h", "d1": "1d"}
+                df_yf = ingestion.fetch_yfinance(
+                    ticker=config["data"]["yfinance_ticker"][0],
+                    period=config["data"]["yfinance_period"],
+                    interval=interval_map.get(tf, "1h"),
+                )
+                if df_yf is not None:
+                    raw_data[tf] = df_yf
+
+    market_data = {}
+    md_config = config.get("market_data", {})
+    if md_config.get("orderbook", {}).get("enabled", False):
+        ob = await ingestion.fetch_orderbook_async(limit=md_config["orderbook"].get("limit", 100))
+        if ob is not None:
+            market_data["orderbook"] = ob
+            logger.info(f"[MARKET DATA] Orderbook: imbalance={ob['bid_ask_imbalance'].item():.4f}")
+    if md_config.get("funding_rate", {}).get("enabled", False):
+        fr = await ingestion.fetch_funding_rate_async()
+        if fr is not None:
+            market_data["funding_rate"] = fr
+            logger.info(f"[MARKET DATA] Funding rate: {fr['funding_rate'].item():.6f}")
+    if md_config.get("open_interest", {}).get("enabled", False):
+        oi = await ingestion.fetch_open_interest_async()
+        if oi is not None:
+            market_data["open_interest"] = oi
+            logger.info(f"[MARKET DATA] Open interest: {oi['open_interest'].item():.2f}")
+
+    await ingestion.close()
+
+    if not raw_data:
+        logger.critical("Tidak ada data yang berhasil diambil. Cek koneksi atau parameter.")
+        return
+
+    all_signals = []
+
+    fusion_enabled = config.get("multi_timeframe", {}).get("enabled", False)
+    primary_tf = config.get("multi_timeframe", {}).get("primary_timeframe", "m15")
+
+    if fusion_enabled:
+        logger.info(f"[FUSION] Menggabungkan fitur multi-timeframe dengan primary={primary_tf}")
+        processed_data = {}
+        for tf, df_raw in raw_data.items():
+            df = add_all_indicators(df_raw)
+            processed_data[tf] = df
+
+        fused_df = fuse_multi_timeframe(processed_data, primary_timeframe=primary_tf)
+        raw_data_fused = {primary_tf: fused_df}
+        training_targets = {primary_tf: fused_df}
+    else:
+        raw_data_fused = raw_data
+        training_targets = raw_data
+
+    for tf, df_raw in raw_data_fused.items():
+        logger.info(f"\n[PROCESS] Memproses timeframe: {tf}")
+
+        df = add_all_indicators(df_raw) if not fusion_enabled else df_raw
+        df = merge_market_data(df, market_data)
+        pipeline = MLPipeline(scaler_type=config["ml"]["scaler_type"])
+        target_type = config.get("target", {}).get("type", "binary")
+        df = pipeline.define_target(df, forward_periods=config["ml"]["forward_periods"], target_type=target_type)
+        df = df.drop_nulls()
+
+        if df.is_empty():
+            logger.warning(f"Data {tf} kosong setelah preprocessing.")
+            continue
+
+        features, feature_cols = pipeline.prepare_features(df, feature_cols=config["ml"]["feature_cols"])
+        targets = df.select("target").to_numpy().flatten()
+
+        if len(features) <= time_steps:
+            logger.warning(f"Data {tf} terlalu sedikit untuk sequence length {time_steps}.")
+            continue
+
+        # Split SEBELUM scaling untuk mencegah data leakage (sertakan context overlap untuk test set)
+        split_idx = int(len(features) * (1 - config["ml"]["test_size"]))
+        features_train_raw = features[:split_idx]
+        features_test_raw = features[max(0, split_idx - time_steps):]
+        targets_train_raw = targets[:split_idx]
+        targets_test_raw = targets[max(0, split_idx - time_steps):]
+
+        # Fit scaler HANYA pada training data
+        scaled_train = pipeline.scale_features(features_train_raw, fit=True)
+        scaled_test = pipeline.scale_features(features_test_raw, fit=False)
+
+        # Buat sequences dari masing-masing set
+        if len(scaled_train) <= time_steps or len(scaled_test) <= time_steps:
+            logger.warning(f"Data {tf} terlalu sedikit setelah split untuk sequence length {time_steps}.")
+            continue
+
+        X_train, y_train = pipeline.create_sequences(scaled_train, targets_train_raw, time_steps=time_steps)
+        X_test, y_test = pipeline.create_sequences(scaled_test, targets_test_raw, time_steps=time_steps)
+
+        # Juga buat X, y_seq dari seluruh data (untuk walk-forward) — scale ulang per fold
+        scaled_all = pipeline.scale_features(features, fit=True)
+        X, y_seq = pipeline.create_sequences(scaled_all, targets, time_steps=time_steps)
+
+        if len(X_train) == 0 or len(X_test) == 0:
+            logger.warning(f"Data {tf} terlalu sedikit setelah sequence creation.")
+            continue
+
+        input_size = X_train.shape[2]
+
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+        logger.info(f"[TUNING] Mulai hyperparameter search untuk {tf}...")
+        best_params, best_acc = hyperparameter_search(
+            X_train, y_train, X_test, y_test, input_size, device,
+            n_trials=n_trials,
+            param_grid=config["hyperparameter_tuning"]["param_grid"],
+            loss_type=config["model"]["loss"],
+            model_type=config["model"]["type"],
+        )
+        logger.info(f"[TUNING] Best params untuk {tf}: {best_params} (acc={best_acc:.4f})")
+
+        logger.info(f"[WALK-FORWARD] Validasi untuk {tf}...")
+        wf_accuracy = walk_forward_validation(
+            X, y_seq, input_size, device, best_params,
+            n_splits=5,
+            loss_type=config["model"]["loss"],
+        )
+        logger.info(f"[WALK-FORWARD] Rata-rata akurasi untuk {tf}: {wf_accuracy:.4f}")
+
+        logger.info(f"[TRAIN] Training final model dengan {best_params['epochs']} epochs...")
+
+        model_type = config["model"]["type"]
+        if model_type == "ensemble":
+            ensemble_cfg = config.get("ensemble", {})
+            model = EnsembleModel(
+                input_size=input_size,
+                device=device,
+                weights=[m.get("weight", 0.33) for m in ensemble_cfg.get("models", [])],
+                voting=ensemble_cfg.get("voting", "soft"),
+            )
+            model.fit(X_train, y_train, X_test, y_test)
+            best_loss = 0.0
+        else:
+            model = create_model(
+                model_type=model_type,
+                input_size=input_size,
+                hidden_size=best_params["hidden_size"],
+                num_layers=best_params["num_layers"],
+                dropout=best_params["dropout"],
+            ).to(device)
+
+            class_weights = get_class_weights(y_train, method=config["model"]["class_weight_method"])
+            loss_fn = get_loss_function(config["model"]["loss"], class_weights.to(device))
+
+            model, best_loss = train_model(
+                X_train, y_train, model,
+                best_params["epochs"], best_params["lr"], device,
+                loss_fn=loss_fn,
+                early_stopping_patience=10,
+            )
+
+        model_path, scaler_path, meta_path = save_checkpoint(
+            model, pipeline.scaler,
+            {"params": best_params, "accuracy": best_acc, "wf_accuracy": wf_accuracy, "loss": best_loss},
+            checkpoint_dir, tf, is_best=True,
+        )
+        logger.info(f"[CHECKPOINT] Model saved: {model_path}")
+
+        model.eval() if hasattr(model, "eval") else None
+        with torch.no_grad():
+            x_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
+            if model_type == "ensemble":
+                preds = model.predict_proba(X_test)[:, 1]
+            else:
+                logits = model(x_test_tensor)
+                preds = torch.sigmoid(logits).cpu().numpy().flatten()
+
+        result_df = df.tail(len(preds)).with_columns(
+            pl.Series("prob", preds)
+        )
+
+        probs = result_df["prob"].to_numpy()
+        logger.info(f"[DIAGNOSTIC] Prob stats: min={probs.min():.4f}, max={probs.max():.4f}, mean={probs.mean():.4f}, std={probs.std():.4f}")
+        logger.info(f"[DIAGNOSTIC] Signals above 0.55: {(probs >= 0.55).sum()}/{len(probs)}")
+
+        bt_config = config["backtest"]
+        backtester = Backtester(
+            tp_pct=bt_config["tp_pct"],
+            sl_pct=bt_config["sl_pct"],
+            initial_capital=bt_config["initial_capital"],
+            position_size_method=bt_config["position_size_method"],
+            atr_multiplier=bt_config["atr_multiplier"],
+            max_risk_per_trade=bt_config["max_risk_per_trade"],
+            trailing_stop_enabled=bt_config["trailing_stop_enabled"],
+            trailing_stop_activation_pct=bt_config["trailing_stop_activation_pct"],
+            trailing_stop_distance_pct=bt_config["trailing_stop_distance_pct"],
+            max_drawdown_pct=bt_config["max_drawdown_pct"],
+            transaction_fee_pct=bt_config["transaction_fee_pct"],
+            slippage_pct=bt_config["slippage_pct"],
+            forward_periods=bt_config["forward_periods"],
+        )
+        bt_result = backtester.run_backtest(result_df, threshold=threshold)
+        backtester.print_backtest_report(bt_result, title=f"BACKTEST REPORT - {symbol} {tf}")
+
+        bt_file = Path(backtest_dir) / f"{tf.replace('/', '_')}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+        save_backtest_results(bt_result, str(bt_file))
+
+        signal = generate_signal(
+            result_df,
+            threshold=threshold,
+            current_price=df["close"].tail(1).item(),
+            min_adx=config.get("signal", {}).get("min_adx", 0.5),
+            require_volume_spike=config.get("signal", {}).get("require_volume_spike", False),
+        )
+
+        if signal is None and config.get("signal", {}).get("use_rule_fallback", False):
+            signal = generate_rule_based_signal(df, min_confluences=config.get("signal", {}).get("min_confluences", 3))
+
+        if signal:
+            signal["symbol"] = symbol
+            signal["timeframe"] = tf
+            signal["winrate"] = f"{bt_result['winrate']}%"
+            signal["backtest_pnl"] = f"{bt_result['return_pct']}%"
+            all_signals.append(signal)
+
+            indicator_values: dict[str, float] = {}
+            for col in result_df.columns:
+                if col in ("prob", "target", "timestamp"):
+                    continue
+                try:
+                    val = result_df[col].tail(1).item()
+                    if isinstance(val, (int, float)) and not isinstance(val, bool):
+                        indicator_values[col] = float(val)
+                except Exception:
+                    pass
+
+            feedback_engine.store_signal(
+                indicator_values=indicator_values,
+                direction=signal.get("direction", "LONG"),
+                entry_price=signal.get("entry", 0.0),
+                probability=signal.get("probability", "0%"),
+                tp_pct=config.get("signal", {}).get("tp_pct", 0.03),
+                sl_pct=config.get("signal", {}).get("sl_pct", 0.015),
+                timeframe=tf,
+                symbol=symbol,
+            )
+
+    print_signal_table(all_signals)
+
+    feedback_status = feedback_engine.get_status()
+    logger.info(
+        f"[FEEDBACK LOOP] Status: running={feedback_status['running']}, "
+        f"enabled={feedback_status['enabled']}, "
+        f"golden_correct={feedback_status['golden_correct_patterns']}, "
+        f"golden_incorrect={feedback_status['golden_incorrect_patterns']}, "
+        f"model_exists={feedback_status['model_exists']}"
+    )
+    logger.info("[DONE] Pipeline selesai.")
+
+
+def run_bot(config_path: str = "config.yaml"):
+    config = load_config(config_path)
+    bot = AutomatedTradingBot(config)
+    feedback_engine = FeedbackLoopEngine(config=config)
+    feedback_engine.start()
+    bot.start()
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "bot":
+        run_bot()
+    else:
+        asyncio.run(main())

@@ -1,0 +1,5 @@
+{
+    "python.analysis.languageServerMode": "default",
+    "python.analysis.autoImportCompletions": true,
+    "markdown.validate.enabled": true
+}
