@@ -154,6 +154,7 @@ Dokumen ini mengatur perilaku bot Telegram di lima grup chat. Prioritas utama ad
 🛑 Stop Loss: {SL}
 ⏱ Timeframe: {TF}
 📈 Indikator: {RSI: val, MACD: signal, BB: position}
+🎗️ Win Rate : {***%}
 🎯 Confidence: {HIGH/MEDIUM/LOW}
 ⚠ Risk/Reward: {R:R ratio}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -196,6 +197,7 @@ Dokumen ini mengatur perilaku bot Telegram di lima grup chat. Prioritas utama ad
 📊 Volatilitas: {HIGH/MEDIUM/LOW}
 📉 Drawdown: {CURRENT}%
 💡 Rekomendasi: {REKOMENDASI}
+🎗️ Win Rate : {***%}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ```
 
@@ -217,6 +219,7 @@ Dokumen ini mengatur perilaku bot Telegram di lima grup chat. Prioritas utama ad
 📈 Analisis: {Technical summary}
 📊 Sentimen: {BULLISH/BEARISH/NEUTRAL}
 🎯 Confidence: {HIGH/MEDIUM/LOW}
+🎗️ Win Rate : {***%}
 ⚠ Risk/Reward: {R:R ratio}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ℹ Pastikan mempertimbangkan sesi trading yang aktif.
@@ -239,6 +242,7 @@ Dokumen ini mengatur perilaku bot Telegram di lima grup chat. Prioritas utama ad
 ⏱ Timeframe: {TF}
 📈 Indikator: {RSI: val, MACD: signal}
 🎯 Confidence: {HIGH/MEDIUM/LOW}
+🎗️ Win Rate : {***%}
 ⚠ Risk/Reward: {R:R ratio}
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 ℹ Data IDX diperbarui setiap sesi perdagangan.
@@ -502,7 +506,7 @@ Setiap fase harus melewati review aturan di Bagian 3 (Format Sinyal Crypto) sebe
 
 ## 11. Catatan Penting
 
-- Semua sinyal crypto harus mencantumkan **confidence score** dan **risk/reward ratio**.
+- Semua sinyal crypto harus mencantumkan **confidence score**, **Win Rate score in Pernsent** dan **risk/reward ratio**.
 - Bot tidak boleh memberikan nasihat finansial eksplisit — semua sinyal harus diformulasikan sebagai **analisis teknikal**, bukan rekomendasi investasi.
 - Pesan wajib mencantumkan disclaimer: `"⚠ Ini adalah analisis teknikal, bukan nasihat investasi. Gunakan dengan risiko Anda sendiri."`
 - Semua timestamp harus dalam **WIB (UTC+7)**.

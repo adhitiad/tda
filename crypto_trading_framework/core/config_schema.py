@@ -277,6 +277,39 @@ class RiskManagementConfig(BaseModel):
     max_risk_per_trade: float = 0.05
 
 
+class TelegramGroupConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    group_id: str = ""
+    name: str = ""
+    tier: str = "free"
+    asset_type: str = "crypto"
+    allowed_symbols: list[str] = Field(default_factory=list)
+    max_signals_per_hour: int = 5
+    max_messages_per_minute: int = 10
+    cooldown_minutes_per_symbol: int = 15
+    burst_window_minutes: int = 5
+    burst_max_count: int = 3
+
+
+class TelegramSignalConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    include_disclaimer: bool = True
+    disclaimer_text: str = "⚠ Ini adalah analisis teknikal, bukan nasihat investasi. Gunakan dengan risiko Anda sendiri."
+    timezone: str = "Asia/Jakarta"
+    timestamp_format: str = "%Y-%m-%d %H:%M:%S WIB"
+
+
+class TelegramBotConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    enabled: bool = False
+    bot_token: str = ""
+    polling_interval: float = 1.0
+    max_retries: int = 3
+    retry_delay_seconds: int = 5
+    groups: list[TelegramGroupConfig] = Field(default_factory=list)
+    signal: TelegramSignalConfig = Field(default_factory=TelegramSignalConfig)
+
+
 class ContinuousLearningConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
     enabled: bool = True
@@ -338,6 +371,7 @@ class AppConfig(BaseModel):
     portfolio_risk: PortfolioRiskConfig = Field(default_factory=PortfolioRiskConfig)
     continuous_learning: ContinuousLearningConfig = Field(default_factory=ContinuousLearningConfig)
     risk_management: RiskManagementConfig = Field(default_factory=RiskManagementConfig)
+    telegram_bot: TelegramBotConfig = Field(default_factory=TelegramBotConfig)
 
 
 def validate_config(raw_config: dict) -> dict:

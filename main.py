@@ -1,6 +1,8 @@
 import asyncio
 import gc
+import os
 import random
+import re
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -41,9 +43,27 @@ from crypto_trading_framework.ml.smart_money_tracker import SmartMoneyTracker
 logger = get_logger("quantuis")
 
 
+def _interpolate_env_vars(value: Any) -> Any:
+    if isinstance(value, str):
+        pattern = re.compile(r'\$\{([^}]+)\}')
+        def replacer(match: re.Match) -> str:
+            env_var = match.group(1)
+            default = ""
+            if ":" in env_var:
+                env_var, default = env_var.split(":", 1)
+            return os.getenv(env_var, default)
+        return pattern.sub(replacer, value)
+    if isinstance(value, dict):
+        return {k: _interpolate_env_vars(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_interpolate_env_vars(item) for item in value]
+    return value
+
+
 def load_config(config_path: str = "config.yaml") -> dict:
     with open(config_path, encoding="utf-8") as f:
         raw_config = yaml.safe_load(f)
+    raw_config = _interpolate_env_vars(raw_config)
     return validate_config(raw_config)
 
 
@@ -423,6 +443,38 @@ async def _process_coin(symbol: str, config: dict) -> None:
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                         "smart_money_analysis": smart_money_data,
                     }
+                    if telegram_bot is not None:
+                        try:
+                            cs = current_signals[symbol]
+                            entry_zone = cs.get("entry_zone", [0.0])
+                            take_profit = cs.get("take_profit", [0.0])
+                            stop_loss = cs.get("stop_loss_atr", 0.0)
+                            await telegram_bot.send_signal(
+                                symbol=symbol,
+                                asset_type="crypto",
+                                signal_data={
+                                    "symbol": symbol,
+                                    "simbol": symbol,
+                                    "direction": cs.get("direction", "LONG"),
+                                    "action": "HOLD",
+                                    "entry": entry_zone[0] if isinstance(entry_zone, list) else entry_zone,
+                                    "entry_zone": entry_zone,
+                                    "take_profit": take_profit if isinstance(take_profit, list) else [take_profit],
+                                    "stop_loss_atr": stop_loss,
+                                    "stop_loss": stop_loss,
+                                    "timeframe": cs.get("timeframe", tf),
+                                    "probability": cs.get("probability", "0%"),
+                                    "probability_float": cs.get("probability_float", 0.0),
+                                    "confidence": "LOW",
+                                    "winrate": "",
+                                    "win_rate": 0.0,
+                                    "atr": cs.get("atr", 0.0),
+                                    "reason": cs.get("reason", veto_reason or "Vetoed by on-chain analysis"),
+                                    "indicators": {},
+                                },
+                            )
+                        except Exception as e:
+                            logger.error(f"[Quantuis] Error sending Telegram veto signal for {symbol}: {e}")
                 else:
                     signal = enrich_signal_with_risk(
                         signal=signal,
@@ -459,6 +511,48 @@ async def _process_coin(symbol: str, config: dict) -> None:
                         "smart_money_analysis": smart_money_data,
                     }
                     logger.info(f"[Quantuis] Signal generated for {symbol}: {signal['direction']} @ {signal.get('entry', 0)}")
+
+                    if telegram_bot is not None:
+                        try:
+                            cs = current_signals[symbol]
+                            entry_zone = cs.get("entry_zone", [0.0])
+                            take_profit = cs.get("take_profit", [0.0])
+                            stop_loss = cs.get("stop_loss_atr", 0.0)
+                            winrate_str = cs.get("winrate", "")
+                            win_rate_val = 0.0
+                            if winrate_str and "%" in winrate_str:
+                                import re as _re
+                                match = _re.search(r"(\d+)\s*-\s*(\d+)%", winrate_str)
+                                if match:
+                                    low = float(match.group(1))
+                                    high = float(match.group(2))
+                                    win_rate_val = (low + high) / 2.0
+                            await telegram_bot.send_signal(
+                                symbol=symbol,
+                                asset_type="crypto",
+                                signal_data={
+                                    "symbol": symbol,
+                                    "simbol": symbol,
+                                    "direction": cs.get("direction", "LONG"),
+                                    "action": cs.get("action", "BUY"),
+                                    "entry": entry_zone[0] if isinstance(entry_zone, list) else entry_zone,
+                                    "entry_zone": entry_zone,
+                                    "take_profit": take_profit if isinstance(take_profit, list) else [take_profit],
+                                    "stop_loss_atr": stop_loss,
+                                    "stop_loss": stop_loss,
+                                    "timeframe": cs.get("timeframe", tf),
+                                    "probability": cs.get("probability", "0%"),
+                                    "probability_float": cs.get("probability_float", 0.0),
+                                    "confidence": cs.get("probability", "MEDIUM"),
+                                    "winrate": winrate_str,
+                                    "win_rate": win_rate_val,
+                                    "atr": cs.get("atr", 0.0),
+                                    "reason": cs.get("reason", ""),
+                                    "indicators": {},
+                                },
+                            )
+                        except Exception as e:
+                            logger.error(f"[Quantuis] Error sending Telegram signal for {symbol}: {e}")
 
                     if shadow_trader is not None:
                         try:
@@ -565,7 +659,7 @@ async def _position_monitoring_loop(config: dict) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global feedback_engine, monitoring_task, learning_task, shadow_trader
+    global feedback_engine, monitoring_task, learning_task, shadow_trader, telegram_bot
     
     config = load_config("config.yaml")
     set_seed(42)
@@ -608,9 +702,25 @@ async def lifespan(app: FastAPI):
     global app_start_time
     app_start_time = time.time()
     logger.info("[Quantuis] Quantuis API server started")
-    
+
+    telegram_bot_cfg = config.get("telegram_bot", {})
+    if telegram_bot_cfg.get("enabled", False):
+        try:
+            from crypto_trading_framework.telegram_bot.bot import TelegramBot
+            from crypto_trading_framework.telegram_bot.config import TelegramBotConfig
+
+            telegram_bot_config = TelegramBotConfig(**telegram_bot_cfg)
+            telegram_bot = TelegramBot(telegram_bot_config)
+            asyncio.create_task(telegram_bot.start())
+            logger.info("[Quantuis] Telegram bot started")
+        except (OSError, RuntimeError) as e:
+            logger.error(f"[Quantuis] Failed to start Telegram bot: {e}")
+            telegram_bot = None
+    else:
+        telegram_bot = None
+
     yield
-    
+
     if monitoring_task is not None:
         monitoring_task.cancel()
         try:
@@ -637,6 +747,12 @@ async def lifespan(app: FastAPI):
 
     if self_tuning_engine is not None:
         self_tuning_engine.stop()
+
+    if telegram_bot is not None:
+        try:
+            await telegram_bot.stop()
+        except Exception:
+            logger.exception("[Quantuis] Error stopping Telegram bot")
 
     logger.info("[Quantuis] Quantuis server shutting down")
 

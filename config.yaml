@@ -285,3 +285,66 @@ risk_management:
   kelly_enabled: true
   kelly_fraction: 0.5
   max_risk_per_trade: 0.05
+
+telegram_bot:
+  enabled: ${TELEGRAM_BOT_ENABLED:-false}
+  bot_token: "${TELEGRAM_BOT_TOKEN}"
+  polling_interval: 1.0
+  max_retries: 3
+  retry_delay_seconds: 5
+  groups:
+    - group_id: "${TELEGRAM_GROUP_FREE_BTC_ETH}"
+      name: "Free - BTC & ETH Only"
+      tier: "free"
+      asset_type: "crypto"
+      allowed_symbols:
+        - "BTC"
+        - "ETH"
+      max_signals_per_hour: 3
+      max_messages_per_minute: 10
+      cooldown_minutes_per_symbol: 15
+      burst_window_minutes: 5
+      burst_max_count: 3
+    - group_id: "${TELEGRAM_GROUP_FREE_ALL_CRYPTO}"
+      name: "Free - All Crypto"
+      tier: "free"
+      asset_type: "crypto"
+      allowed_symbols: []
+      max_signals_per_hour: 5
+      max_messages_per_minute: 10
+      cooldown_minutes_per_symbol: 15
+      burst_window_minutes: 5
+      burst_max_count: 3
+    - group_id: "${TELEGRAM_GROUP_PRO_CRYPTO_FOREX}"
+      name: "Pro - All Crypto & Forex"
+      tier: "pro"
+      asset_type: "crypto_forex"
+      allowed_symbols: []
+      max_signals_per_hour: 8
+      max_messages_per_minute: 15
+      cooldown_minutes_per_symbol: 10
+      burst_window_minutes: 5
+      burst_max_count: 5
+    - group_id: "${TELEGRAM_GROUP_PRO_INDO_IDX}"
+      name: "Pro - Indo Sham Idx"
+      tier: "pro"
+      asset_type: "crypto_idx"
+      allowed_symbols:
+        - "IHSG"
+        - "LQ45"
+        - "IDX30"
+      max_signals_per_hour: 6
+      max_messages_per_minute: 15
+      cooldown_minutes_per_symbol: 10
+      burst_window_minutes: 5
+      burst_max_count: 5
+    - group_id: "${TELEGRAM_GROUP_ENTERPRISE}"
+      name: "Enterprise - Crypto, Forex & Saham Idx"
+      tier: "enterprise"
+      asset_type: "crypto_forex_idx"
+      allowed_symbols: []
+      max_signals_per_hour: 15
+      max_messages_per_minute: 20
+      cooldown_minutes_per_symbol: 5
+      burst_window_minutes: 5
+      burst_max_count: 8

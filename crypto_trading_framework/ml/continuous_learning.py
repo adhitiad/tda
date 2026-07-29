@@ -204,7 +204,7 @@ class GoldenMemoryManager:
         if df.is_empty():
             return df
         return df.with_columns(
-            pl.col("indicator_values").apply(json.loads).alias("indicators_parsed")
+            pl.col("indicator_values").map_elements(json.loads).alias("indicators_parsed")
         )
 
     def get_metadata(self) -> dict[str, Any]:
