@@ -272,6 +272,14 @@ class TaskQueueConfig(BaseModel):
     enabled: bool = True
     max_concurrency: int = 4
     timeout: float = 120.0
+    celery: "CeleryConfig" = Field(default_factory=lambda: CeleryConfig())
+
+
+class CeleryConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+    broker_url: str = "redis://localhost:6379/0"
+    result_backend: str = "redis://localhost:6379/1"
+    task_prefix: str = "inference"
 
 
 class DriftDetectionConfig(BaseModel):

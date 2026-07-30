@@ -17,7 +17,7 @@ class SignalFormatter:
         )
         self.timezone = self.config.get("timezone", "Asia/Jakarta")
 
-def format_entry_signal(
+    def format_entry_signal(
         self,
         symbol: str,
         direction: str,

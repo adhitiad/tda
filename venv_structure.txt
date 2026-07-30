@@ -1,2 +1,0 @@
-E:\tda\venv\Lib\site-packages\ccxt
-E:\tda\venv\Lib\site-packages\ccxt.pro

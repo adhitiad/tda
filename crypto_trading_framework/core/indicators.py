@@ -2,7 +2,7 @@ import polars as pl
 import numpy as np
 
 
-def compute_ema(df: pl.DataFrame, column: str = "close", periods: list = [20, 50, 200]) -> pl.DataFrame:
+def compute_ema(df: pl.DataFrame | pl.LazyFrame, column: str = "close", periods: list = [20, 50, 200]) -> pl.DataFrame | pl.LazyFrame:
     result = df
     for period in periods:
         ema_col = f"ema_{period}"
@@ -13,8 +13,8 @@ def compute_ema(df: pl.DataFrame, column: str = "close", periods: list = [20, 50
 
 
 def compute_bollinger_bands(
-    df: pl.DataFrame, column: str = "close", period: int = 20, multiplier: float = 2.0
-) -> pl.DataFrame:
+    df: pl.DataFrame | pl.LazyFrame, column: str = "close", period: int = 20, multiplier: float = 2.0
+) -> pl.DataFrame | pl.LazyFrame:
     sma = pl.col(column).rolling_mean(window_size=period)
     std = pl.col(column).rolling_std(window_size=period)
 
@@ -27,7 +27,7 @@ def compute_bollinger_bands(
     return df
 
 
-def compute_rsi(df: pl.DataFrame, column: str = "close", period: int = 14) -> pl.DataFrame:
+def compute_rsi(df: pl.DataFrame | pl.LazyFrame, column: str = "close", period: int = 14) -> pl.DataFrame | pl.LazyFrame:
     delta = pl.col(column).diff()
     gain = pl.when(delta > 0).then(delta).otherwise(0)
     loss = pl.when(delta < 0).then(-delta).otherwise(0)
@@ -43,14 +43,14 @@ def compute_rsi(df: pl.DataFrame, column: str = "close", period: int = 14) -> pl
 
 
 def compute_stochastic(
-    df: pl.DataFrame,
+    df: pl.DataFrame | pl.LazyFrame,
     high_col: str = "high",
     low_col: str = "low",
     close_col: str = "close",
     k_period: int = 14,
     d_period: int = 3,
     smooth_k: int = 3,
-) -> pl.DataFrame:
+) -> pl.DataFrame | pl.LazyFrame:
     lowest_low = pl.col(low_col).rolling_min(window_size=k_period)
     highest_high = pl.col(high_col).rolling_max(window_size=k_period)
 
@@ -65,7 +65,7 @@ def compute_stochastic(
     return df
 
 
-def compute_atr(df: pl.DataFrame, period: int = 14) -> pl.DataFrame:
+def compute_atr(df: pl.DataFrame | pl.LazyFrame, period: int = 14) -> pl.DataFrame | pl.LazyFrame:
     high = pl.col("high")
     low = pl.col("low")
     close = pl.col("close")
@@ -82,12 +82,12 @@ def compute_atr(df: pl.DataFrame, period: int = 14) -> pl.DataFrame:
 
 
 def compute_macd(
-    df: pl.DataFrame,
+    df: pl.DataFrame | pl.LazyFrame,
     column: str = "close",
     fast: int = 12,
     slow: int = 26,
     signal: int = 9,
-) -> pl.DataFrame:
+) -> pl.DataFrame | pl.LazyFrame:
     ema_fast = pl.col(column).ewm_mean(span=fast, adjust=False)
     ema_slow = pl.col(column).ewm_mean(span=slow, adjust=False)
     macd = ema_fast - ema_slow
@@ -103,11 +103,11 @@ def compute_macd(
 
 
 def compute_ichimoku(
-    df: pl.DataFrame,
+    df: pl.DataFrame | pl.LazyFrame,
     tenkan: int = 9,
     kijun: int = 26,
     senkou_span_b: int = 52,
-) -> pl.DataFrame:
+) -> pl.DataFrame | pl.LazyFrame:
     high = pl.col("high")
     low = pl.col("low")
 
@@ -136,7 +136,7 @@ def compute_ichimoku(
     return df
 
 
-def compute_volume_profile(df: pl.DataFrame, bins: int = 50) -> pl.DataFrame:
+def compute_volume_profile(df: pl.DataFrame | pl.LazyFrame, bins: int = 50) -> pl.DataFrame | pl.LazyFrame:
     close = pl.col("close")
     volume = pl.col("volume")
 
@@ -167,20 +167,26 @@ def compute_volume_profile(df: pl.DataFrame, bins: int = 50) -> pl.DataFrame:
     )
 
     volume_profile = volume_profile.sort("volume_bin")
-    cum_vol = volume_profile["bin_volume"].cum_sum()
-    total_vol = volume_profile["bin_volume"].sum()
+    cum_vol = pl.col("bin_volume").cum_sum()
+    total_vol = pl.col("bin_volume").sum()
     volume_profile = volume_profile.with_columns(
         (cum_vol / total_vol).alias("cum_volume_share")
     )
 
-    f20 = volume_profile.filter(pl.col("cum_volume_share") >= 0.2)
-    p20 = f20.head(1)["bin_price"].item() if len(f20) > 0 else float(close.mean())
+    is_lazy = isinstance(df, pl.LazyFrame)
+    vp_eager = volume_profile.collect() if is_lazy else volume_profile
 
-    f50 = volume_profile.filter(pl.col("cum_volume_share") >= 0.5)
-    p50 = f50.head(1)["bin_price"].item() if len(f50) > 0 else float(close.mean())
+    def _extract_price(prof: pl.DataFrame, threshold: float) -> float:
+        filtered = prof.filter(pl.col("cum_volume_share") >= threshold)
+        if len(filtered) > 0:
+            return filtered.head(1)["bin_price"].item()
+        if is_lazy:
+            return float(df.select(pl.col("close").mean()).collect().item())
+        return float(df["close"].mean())
 
-    f80 = volume_profile.filter(pl.col("cum_volume_share") >= 0.8)
-    p80 = f80.head(1)["bin_price"].item() if len(f80) > 0 else float(close.mean())
+    p20 = _extract_price(vp_eager, 0.2)
+    p50 = _extract_price(vp_eager, 0.5)
+    p80 = _extract_price(vp_eager, 0.8)
 
     df = df.with_columns(
         pl.lit(p20).alias("volume_profile_p20"),
@@ -207,6 +213,10 @@ def compute_volume_profile(df: pl.DataFrame, bins: int = 50) -> pl.DataFrame:
         (pl.col("z_score") ** 4).mean().alias("volume_profile_kurtosis")
     )
 
+    if is_lazy:
+        skewness = skewness.collect()
+        kurtosis = kurtosis.collect()
+
     df = df.with_columns(
         pl.lit(skewness["volume_profile_skew"].item()).alias("volume_profile_skew"),
         pl.lit(kurtosis["volume_profile_kurtosis"].item()).alias("volume_profile_kurtosis"),
@@ -215,7 +225,7 @@ def compute_volume_profile(df: pl.DataFrame, bins: int = 50) -> pl.DataFrame:
     return df
 
 
-def compute_microstructure_features(df: pl.DataFrame) -> pl.DataFrame:
+def compute_microstructure_features(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame | pl.LazyFrame:
     close = pl.col("close")
     volume = pl.col("volume")
 
@@ -252,7 +262,7 @@ def compute_microstructure_features(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def compute_returns(df: pl.DataFrame) -> pl.DataFrame:
+def compute_returns(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame | pl.LazyFrame:
     close = pl.col("close")
     df = df.with_columns(
         close.pct_change(1).alias("returns_1d"),
@@ -261,7 +271,7 @@ def compute_returns(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def compute_vwap(df: pl.DataFrame) -> pl.DataFrame:
+def compute_vwap(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame | pl.LazyFrame:
     high = pl.col("high")
     low = pl.col("low")
     close = pl.col("close")
@@ -281,7 +291,7 @@ def compute_vwap(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def compute_obv(df: pl.DataFrame) -> pl.DataFrame:
+def compute_obv(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame | pl.LazyFrame:
     close = pl.col("close")
     volume = pl.col("volume")
 
@@ -295,7 +305,7 @@ def compute_obv(df: pl.DataFrame) -> pl.DataFrame:
     return df
 
 
-def compute_volume_spike(df: pl.DataFrame, window: int = 20, threshold: float = 2.0) -> pl.DataFrame:
+def compute_volume_spike(df: pl.DataFrame | pl.LazyFrame, window: int = 20, threshold: float = 2.0) -> pl.DataFrame | pl.LazyFrame:
     volume = pl.col("volume")
     volume_sma = volume.rolling_mean(window_size=window)
     volume_std = volume.rolling_std(window_size=window)
@@ -310,7 +320,7 @@ def compute_volume_spike(df: pl.DataFrame, window: int = 20, threshold: float = 
     return df
 
 
-def compute_regime(df: pl.DataFrame, lookback: int = 20, threshold: float = 25.0) -> pl.DataFrame:
+def compute_regime(df: pl.DataFrame | pl.LazyFrame, lookback: int = 20, threshold: float = 25.0) -> pl.DataFrame | pl.LazyFrame:
     high = pl.col("high")
     low = pl.col("low")
     close = pl.col("close")
@@ -350,7 +360,7 @@ def compute_regime(df: pl.DataFrame, lookback: int = 20, threshold: float = 25.0
     return df
 
 
-def add_all_indicators(df: pl.DataFrame) -> pl.DataFrame:
+def add_all_indicators(df: pl.DataFrame | pl.LazyFrame) -> pl.DataFrame | pl.LazyFrame:
     df = compute_ema(df, column="close", periods=[20, 50, 200])
     df = compute_bollinger_bands(df, column="close", period=20, multiplier=2.0)
     df = compute_rsi(df, column="close", period=14)

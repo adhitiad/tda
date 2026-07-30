@@ -204,7 +204,7 @@ class GoldenMemoryManager:
         if df.is_empty():
             return df
         return df.with_columns(
-            pl.col("indicator_values").map_elements(json.loads).alias("indicators_parsed")
+            pl.col("indicator_values").map_elements(lambda x: x, return_dtype=pl.Utf8).alias("indicators_parsed")
         )
 
     def get_metadata(self) -> dict[str, Any]:
@@ -678,9 +678,9 @@ class FeedbackLoopEngine:
         if not flat_indicators:
             return {"status": "skipped", "reason": "no_indicator_data"}
 
-        all_keys = sorted({k for d in flat_indicators for k in d})
+        all_keys = sorted({k for d in flat_indicators for k in (json.loads(d) if isinstance(d, str) else d)})
         indicator_matrix = np.array(
-            [[d.get(k, 0.0) for k in all_keys] for d in flat_indicators],
+            [[(json.loads(d) if isinstance(d, str) else d).get(k, 0.0) for k in all_keys] for d in flat_indicators],
             dtype=np.float32,
         )
 

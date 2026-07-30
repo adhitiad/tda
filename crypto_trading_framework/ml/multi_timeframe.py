@@ -2,7 +2,7 @@ import polars as pl
 from typing import Dict, List, Optional
 
 
-def resample_to_base(df: pl.DataFrame, base_timeframe: str) -> pl.DataFrame:
+def resample_to_base(df: pl.DataFrame | pl.LazyFrame, base_timeframe: str) -> pl.DataFrame | pl.LazyFrame:
     tf_minutes = {"m5": 5, "m15": 15, "m30": 30, "h1": 60, "h4": 240, "d1": 1440}
     base_minutes = tf_minutes.get(base_timeframe, 15)
 
@@ -23,11 +23,11 @@ def resample_to_base(df: pl.DataFrame, base_timeframe: str) -> pl.DataFrame:
 
 
 def forward_fill_join(
-    base_df: pl.DataFrame,
-    aux_df: pl.DataFrame,
+    base_df: pl.DataFrame | pl.LazyFrame,
+    aux_df: pl.DataFrame | pl.LazyFrame,
     aux_suffix: str,
     base_timeframe: str,
-) -> pl.DataFrame:
+) -> pl.DataFrame | pl.LazyFrame:
     tf_minutes = {"m5": 5, "m15": 15, "m30": 30, "h1": 60, "h4": 240, "d1": 1440}
     base_minutes = tf_minutes.get(base_timeframe, 15)
     aux_minutes = tf_minutes.get(aux_suffix.replace("_features", ""), 60)
@@ -50,10 +50,10 @@ def forward_fill_join(
 
 
 def fuse_multi_timeframe(
-    data: Dict[str, pl.DataFrame],
+    data: Dict[str, pl.DataFrame | pl.LazyFrame],
     primary_timeframe: str = "m15",
     auxiliary_timeframes: Optional[List[str]] = None,
-) -> pl.DataFrame:
+) -> pl.DataFrame | pl.LazyFrame:
     if auxiliary_timeframes is None:
         auxiliary_timeframes = [tf for tf in data.keys() if tf != primary_timeframe]
 

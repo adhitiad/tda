@@ -11,23 +11,28 @@ from crypto_trading_framework.core.alerting import (
     alert_training_failure,
 )
 from crypto_trading_framework.core.checkpoint_utils import save_checkpoint
+from crypto_trading_framework.core.executor import OrderExecutor
+from crypto_trading_framework.core.indicators import add_all_indicators
+from crypto_trading_framework.core.kill_switch import is_active as kill_switch_is_active
 from crypto_trading_framework.core.logging import get_logger
+from crypto_trading_framework.core.scheduler import TrainingScheduler
 from crypto_trading_framework.data_ingestion import DataIngestion
 from crypto_trading_framework.ml.drift_detector import DriftConfig, DriftDetector
-from crypto_trading_framework.core.executor import OrderExecutor
 from crypto_trading_framework.ml.feature_store import (
     compute_and_store_features,
     get_latest_features,
 )
-from crypto_trading_framework.core.indicators import add_all_indicators
+from crypto_trading_framework.ml.inference_worker import get_celery_app
 from crypto_trading_framework.ml.ml_pipeline import MLPipeline
 from crypto_trading_framework.ml.model import create_model
-from crypto_trading_framework.ml.model_registry import ModelRegistry, ModelRegistryConfig
-from crypto_trading_framework.portfolio import PortfolioRiskManager, PortfolioRiskConfig
+from crypto_trading_framework.ml.model_registry import (
+    ModelRegistry,
+    ModelRegistryConfig,
+)
 from crypto_trading_framework.ml.rule_signals import generate_rule_based_signal
-from crypto_trading_framework.core.scheduler import TrainingScheduler
 from crypto_trading_framework.ml.signals import generate_signal
 from crypto_trading_framework.ml.task_queue import BoundedTaskPool, TaskQueueConfig
+from crypto_trading_framework.portfolio import PortfolioRiskConfig, PortfolioRiskManager
 
 logger = get_logger("bot")
 
@@ -154,6 +159,9 @@ class AutomatedTradingBot:
             "scaler": pipeline.scaler,
             "feature_cols": feature_cols,
             "time_steps": self.config["ml"]["time_steps"],
+            "model_type": self.config["model"]["type"],
+            "input_size": X_train.shape[2],
+            "model_path": "models/best_weights.pth",
         }
 
         if self.drift_detector is not None:
@@ -211,6 +219,11 @@ class AutomatedTradingBot:
             self.portfolio.update_capital(initial_capital)
 
         while self.running:
+            if kill_switch_is_active():
+                logger.warning("[BOT] Kill switch aktif. Menghentikan bot.")
+                self.stop()
+                break
+
             for symbol in self.symbols:
                 if symbol not in self.trained_models:
                     continue
@@ -272,13 +285,12 @@ class AutomatedTradingBot:
                     X, _ = pipeline.create_sequences(scaled, df.select("target").to_numpy().flatten(), time_steps=model_info["time_steps"])
 
                     if len(X) > 0:
-                        model = model_info["model"]
-                        model.eval()
-                        import torch
-                        with torch.no_grad():
-                            x_tensor = torch.tensor(X[-1:], dtype=torch.float32)
-                            logits = model(x_tensor)
-                            prob = torch.sigmoid(logits).item()
+                        # Use Celery for inference
+                        prob = await self._run_inference_celery(
+                            X[-1:], model_info["model_type"], model_info["input_size"], model_info.get("model_path", "models/best_weights.pth")
+                        )
+                        if prob is None:
+                            return None
 
                         result_df = df.tail(len(X)).with_columns(pl.Series("prob", [prob] * len(X)))
                         signal = generate_signal(
@@ -315,7 +327,7 @@ class AutomatedTradingBot:
         if primary_tf not in raw_data:
             return None
 
-        df = add_all_indicators(raw_data[primary_tf])
+        df = add_all_indicators(raw_data[primary_tf].lazy()).collect()
         df = pipeline.define_target(df, forward_periods=self.config["ml"]["forward_periods"])
         df = df.drop_nulls()
 
@@ -329,13 +341,12 @@ class AutomatedTradingBot:
         if len(X) == 0:
             return None
 
-        model = model_info["model"]
-        model.eval()
-        import torch
-        with torch.no_grad():
-            x_tensor = torch.tensor(X[-1:], dtype=torch.float32)
-            logits = model(x_tensor)
-            prob = torch.sigmoid(logits).item()
+        # Use Celery for inference
+        prob = await self._run_inference_celery(
+            X[-1:], model_info["model_type"], model_info["input_size"], model_info.get("model_path", "models/best_weights.pth")
+        )
+        if prob is None:
+            return None
 
         result_df = df.tail(len(X)).with_columns(pl.Series("prob", [prob] * len(X)))
         signal = generate_signal(
@@ -354,6 +365,34 @@ class AutomatedTradingBot:
             signal = generate_rule_based_signal(df, min_confluences=self.config["signal"].get("min_confluences", 3))
 
         return signal
+
+    async def _run_inference_celery(
+        self,
+        X: np.ndarray,
+        model_type: str,
+        input_size: int,
+        model_path: str = "models/best_weights.pth",
+    ) -> float | None:
+        """Run inference via Celery worker."""
+        loop = asyncio.get_event_loop()
+        celery_app = get_celery_app(self.config)
+
+        try:
+            task = celery_app.send_task(
+                "inference.run",
+                args=[model_path, model_type, input_size, X.tolist(), "cpu"],
+                queue="inference",
+            )
+            # Wait for result with timeout
+            result = await loop.run_in_executor(
+                None, lambda: task.get(timeout=self.config.get("task_queue", {}).get("timeout", 120.0))
+            )
+            if result and len(result) > 0:
+                return float(result[0])
+            return None
+        except Exception as e:
+            logger.error(f"[BOT] Celery inference failed: {e}")
+            return None
 
     def start(self):
         if self.running:

@@ -13,7 +13,6 @@ from enum import Enum
 from typing import Any
 
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
 logger = logging.getLogger("smart_money")
 

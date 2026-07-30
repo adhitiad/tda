@@ -57,6 +57,7 @@ FEATURE_COLUMNS = [
     "obv", "obv_change",
     "volume_spike", "volume_spike_flag",
     "regime_trending", "adx", "plus_di", "minus_di",
+    "is_interpolated",
 ]
 
 
@@ -118,6 +119,7 @@ class FeatureStore(FeatureStoreBase):
     adx: float = Column(Float, nullable=True)
     plus_di: float = Column(Float, nullable=True)
     minus_di: float = Column(Float, nullable=True)
+    is_interpolated: float = Column(Float, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("symbol", "timeframe", "timestamp", name="uq_feature_symbol_tf_ts"),
@@ -196,7 +198,7 @@ def compute_and_store_features(df: pd.DataFrame, symbol: str, timeframe: str, so
     from crypto_trading_framework.core.indicators import add_all_indicators
 
     df_pl = pl.from_pandas(df)
-    df_with_features = add_all_indicators(df_pl)
+    df_with_features = add_all_indicators(df_pl.lazy()).collect()
 
     available_feature_cols = [c for c in FEATURE_COLUMNS if c in df_with_features.columns]
     pdf = df_with_features.select(["timestamp"] + available_feature_cols).to_pandas()

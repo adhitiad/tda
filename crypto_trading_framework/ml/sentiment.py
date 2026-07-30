@@ -13,6 +13,7 @@ import feedparser
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
+
 logger = logging.getLogger("sentiment")
 
 

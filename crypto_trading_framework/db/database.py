@@ -55,6 +55,7 @@ class MarketDataOHLCV(Base):
     close: Mapped[float] = mapped_column(Float, nullable=False)
     volume: Mapped[float] = mapped_column(Float, nullable=False)
     source: Mapped[str] = mapped_column(String(32), nullable=False, default="ccxt")
+    is_interpolated: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
     updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, server_default=text("CURRENT_TIMESTAMP"))
 
@@ -205,6 +206,33 @@ def create_schema(override_url: str = ""):
     engine = get_engine(override_url=override_url)
     Base.metadata.create_all(engine)
     _enable_hypertables(override_url=override_url)
+    _ensure_columns_exist(override_url=override_url)
+
+
+def _ensure_columns_exist(override_url: str = ""):
+    engine = get_engine(override_url=override_url)
+    dialect = engine.dialect.name
+
+    def _add_column(session, table: str, column: str, col_def: str):
+        try:
+            if dialect == "sqlite":
+                result = session.execute(text(f"PRAGMA table_info({table})"))
+                cols = [row[1] for row in result.fetchall()]
+                if column not in cols:
+                    session.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}"))
+            else:
+                result = session.execute(text("""
+                    SELECT column_name FROM information_schema.columns
+                    WHERE table_name = :table AND column_name = :col
+                """), {"table": table, "col": column})
+                if not result.fetchone():
+                    session.execute(text(f"ALTER TABLE {table} ADD COLUMN {column} {col_def}"))
+        except Exception as exc:
+            logger.debug("Gagal memastikan kolom %s pada tabel %s: %s", column, table, exc)
+
+    with session_scope(override_url=override_url) as session:
+        _add_column(session, "market_data_ohlcv", "is_interpolated", "FLOAT NOT NULL DEFAULT 0.0")
+        _add_column(session, "feature_store", "is_interpolated", "FLOAT NOT NULL DEFAULT 0.0")
 
 
 def _enable_hypertables(override_url: str = ""):
@@ -242,8 +270,11 @@ def upsert_ohlcv_dataframe(df: pd.DataFrame, source: str = "ccxt") -> int:
     df["timestamp"] = pd.to_datetime(df["timestamp"]).dt.floor("ms")
     df["source"] = source
     df["updated_at"] = pd.Timestamp.now("UTC")
+    if "is_interpolated" not in df.columns:
+        df["is_interpolated"] = 0.0
 
-    records = df[["symbol", "timeframe", "timestamp", "open", "high", "low", "close", "volume", "source", "updated_at"]].to_dict("records")
+    insert_cols = ["symbol", "timeframe", "timestamp", "open", "high", "low", "close", "volume", "source", "updated_at", "is_interpolated"]
+    records = df[insert_cols].to_dict("records")
     for rec in records:
         rec["timestamp"] = rec["timestamp"].to_pydatetime() if hasattr(rec["timestamp"], "to_pydatetime") else rec["timestamp"]
         rec["updated_at"] = rec["updated_at"].to_pydatetime() if hasattr(rec["updated_at"], "to_pydatetime") else rec["updated_at"]
@@ -252,9 +283,9 @@ def upsert_ohlcv_dataframe(df: pd.DataFrame, source: str = "ccxt") -> int:
     with session_scope() as session:
         stmt = text("""
             INSERT INTO market_data_ohlcv
-                (symbol, timeframe, timestamp, open, high, low, close, volume, source, updated_at)
+                (symbol, timeframe, timestamp, open, high, low, close, volume, source, updated_at, is_interpolated)
             VALUES
-                (:symbol, :timeframe, :timestamp, :open, :high, :low, :close, :volume, :source, :updated_at)
+                (:symbol, :timeframe, :timestamp, :open, :high, :low, :close, :volume, :source, :updated_at, :is_interpolated)
             ON CONFLICT (symbol, timeframe, timestamp) DO UPDATE SET
                 open = EXCLUDED.open,
                 high = EXCLUDED.high,
@@ -262,7 +293,8 @@ def upsert_ohlcv_dataframe(df: pd.DataFrame, source: str = "ccxt") -> int:
                 close = EXCLUDED.close,
                 volume = EXCLUDED.volume,
                 source = EXCLUDED.source,
-                updated_at = EXCLUDED.updated_at
+                updated_at = EXCLUDED.updated_at,
+                is_interpolated = EXCLUDED.is_interpolated
         """)
         for rec in records:
             result = session.execute(stmt, rec)
@@ -331,7 +363,7 @@ def query_ohlcv(
         params["end"] = end
 
     sql = f"""
-        SELECT timestamp, open, high, low, close, volume, source
+        SELECT timestamp, open, high, low, close, volume, source, is_interpolated
         FROM market_data_ohlcv
         WHERE {' AND '.join(where)}
         ORDER BY timestamp ASC

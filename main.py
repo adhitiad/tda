@@ -20,24 +20,25 @@ import torch
 import yaml
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
-from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
 from crypto_trading_framework.core.bot import AutomatedTradingBot
 from crypto_trading_framework.core.config_schema import validate_config
 from crypto_trading_framework.core.indicators import add_all_indicators
+from crypto_trading_framework.core.kill_switch import is_active as kill_switch_is_active
 from crypto_trading_framework.core.logging import get_logger
 from crypto_trading_framework.data_ingestion import DataIngestion
 from crypto_trading_framework.db.database import create_schema
 from crypto_trading_framework.ml.continuous_learning import FeedbackLoopEngine
+from crypto_trading_framework.ml.inference_worker import get_celery_app
 from crypto_trading_framework.ml.ml_pipeline import MLPipeline
 from crypto_trading_framework.ml.model import create_model
 from crypto_trading_framework.ml.multi_timeframe import fuse_multi_timeframe
 from crypto_trading_framework.ml.risk_management import enrich_signal_with_risk
 from crypto_trading_framework.ml.rule_signals import generate_rule_based_signal
+from crypto_trading_framework.ml.self_tuning import SelfTuningEngine
 from crypto_trading_framework.ml.sentiment import SentimentEngine
 from crypto_trading_framework.ml.shadow_trader import ShadowTrader
 from crypto_trading_framework.ml.signals import generate_signal, print_signal_table
-from crypto_trading_framework.ml.self_tuning import SelfTuningEngine
 from crypto_trading_framework.ml.smart_money_tracker import SmartMoneyTracker
 
 logger = get_logger("quantuis")
@@ -93,7 +94,7 @@ def _log_memory_usage(stage: str):
         logger.debug(f"[Memory Audit] Failed to get memory info: {e}")
 
 
-def merge_market_data(df: pl.DataFrame, market_data: dict) -> pl.DataFrame:
+def merge_market_data(df: pl.DataFrame | pl.LazyFrame, market_data: dict) -> pl.DataFrame | pl.LazyFrame:
     for md_df in market_data.values():
         if md_df is not None and not md_df.is_empty():
             for col in md_df.columns:
@@ -120,6 +121,7 @@ position_monitor_task: asyncio.Task | None = None
 sentiment_engine: SentimentEngine | None = None
 self_tuning_engine: SelfTuningEngine | None = None
 smart_money_tracker: SmartMoneyTracker | None = None
+celery_app: Any = None
 app_start_time: float = 0.0
 
 
@@ -265,7 +267,7 @@ async def _process_coin(symbol: str, config: dict) -> None:
         if fusion_enabled:
             processed_data = {}
             for tf, df_raw in raw_data.items():
-                df = add_all_indicators(df_raw)
+                df = add_all_indicators(df_raw.lazy())
                 processed_data[tf] = df
             fused_df = fuse_multi_timeframe(processed_data, primary_timeframe=primary_tf)
             raw_data_fused = {primary_tf: fused_df}
@@ -274,8 +276,9 @@ async def _process_coin(symbol: str, config: dict) -> None:
             raw_data_fused = raw_data
 
         for tf, df_raw in raw_data_fused.items():
-            df = add_all_indicators(df_raw) if not fusion_enabled else df_raw
+            df = add_all_indicators(df_raw.lazy()) if not fusion_enabled else df_raw
             df = merge_market_data(df, market_data)
+            df = df.collect()
             pipeline = MLPipeline(scaler_type=config["ml"]["scaler_type"])
             target_type = config.get("target", {}).get("type", "binary")
             df = pipeline.define_target(df, forward_periods=config["ml"]["forward_periods"], target_type=target_type)
@@ -337,12 +340,35 @@ async def _process_coin(symbol: str, config: dict) -> None:
                 except Exception:
                     pass
 
-            model.eval()
-            with torch.no_grad():
-                x_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
-                logits = model(x_test_tensor)
-                preds = torch.sigmoid(logits).cpu().numpy().flatten()
-                del x_test_tensor, logits
+            # Run inference via Celery
+            task = celery_app.send_task(
+                "inference.run",
+                args=[
+                    str(best_weights_path),
+                    model_type if model_type != "ensemble" else "lstm",
+                    input_size,
+                    X_test.tolist(),
+                    str(device),
+                ],
+                queue="inference",
+            )
+            # Wait for result with timeout
+            timeout = config.get("task_queue", {}).get("timeout", 120)
+            try:
+                preds_list = await asyncio.get_event_loop().run_in_executor(
+                    None, lambda t=task, timeout=timeout: t.get(timeout=timeout)
+                )
+                preds = np.array(preds_list, dtype=np.float32)
+            except Exception as e:
+                logger.error(f"[Quantuis] Inference task failed: {e}")
+                del model, state_dict, best_weights_path
+                del X_train, X_test, features_train_raw, features_test_raw
+                del scaled_train, scaled_test, targets_train_raw, targets_test_raw
+                del features, targets, pipeline
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                gc.collect()
+                continue
 
             result_df = df.tail(len(preds)).with_columns(pl.Series("prob", preds))
 
@@ -381,7 +407,6 @@ async def _process_coin(symbol: str, config: dict) -> None:
                 }
                 vetoed = False
                 veto_reason = ""
-                veto_mode = "NONE"
 
                 # Check oversold status from RSI
                 is_oversold = False
@@ -410,7 +435,6 @@ async def _process_coin(symbol: str, config: dict) -> None:
                         if sm_vetoed:
                             vetoed = True
                             veto_reason = sm_reason
-                            veto_mode = sm_mode
                             smart_money_data["veto_status"] = f"VETO_{sm_mode}"
                             logger.warning(f"[Quantuis] Smart Money VETO triggered ({sm_mode}): {sm_reason}")
                             try:
@@ -622,6 +646,10 @@ async def _coin_monitoring_loop(config: dict) -> None:
     interval_minutes = 15
     cycle_count = 0
     while True:
+        if kill_switch_is_active():
+            logger.warning("[Quantuis] Kill switch aktif. Menghentikan monitoring loop.")
+            break
+
         cycle_count += 1
         try:
             logger.info(f"[Quantuis] Starting coin monitoring cycle {cycle_count} for {len(symbols)} symbols")
@@ -650,6 +678,10 @@ async def _continuous_learning_loop(config: dict) -> None:
     feedback_engine = FeedbackLoopEngine(config=config)
     feedback_engine.start()
     while True:
+        if kill_switch_is_active():
+            logger.warning("[Quantuis] Kill switch aktif. Menghentikan continuous learning loop.")
+            break
+
         try:
             await asyncio.sleep(300)
         except asyncio.CancelledError:
@@ -662,6 +694,10 @@ async def _position_monitoring_loop(config: dict) -> None:
     global shadow_trader
     interval_minutes = 1
     while True:
+        if kill_switch_is_active():
+            logger.warning("[Quantuis] Kill switch aktif. Menghentikan position monitoring loop.")
+            break
+
         try:
             if shadow_trader is not None:
                 shadow_trader.monitor_positions(price_fetcher=None)
@@ -672,7 +708,7 @@ async def _position_monitoring_loop(config: dict) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global feedback_engine, monitoring_task, learning_task, shadow_trader, telegram_bot
+    global feedback_engine, monitoring_task, learning_task, shadow_trader, telegram_bot, celery_app
     
     config = load_config("config.yaml")
     set_seed(42)
@@ -685,6 +721,11 @@ async def lifespan(app: FastAPI):
             logger.error(f"[Quantuis] Failed to create/verify database schema: {e}")
 
     _load_models_from_disk("models")
+
+    # Initialize Celery app for async inference
+    global celery_app
+    celery_app = get_celery_app(config)
+    logger.info("[Quantuis] Celery app initialized for inference")
 
     feedback_engine = FeedbackLoopEngine(config=config)
     feedback_engine.start()
@@ -701,6 +742,9 @@ async def lifespan(app: FastAPI):
     logger.info("[Quantuis] Self-tuning scheduler started (Sunday 02:00 UTC)")
 
     shadow_trader = ShadowTrader()
+
+    if kill_switch_is_active():
+        logger.warning("[Quantuis] Kill switch aktif saat startup. Background tasks akan dihentikan segera.")
 
     monitoring_task = asyncio.create_task(_coin_monitoring_loop(config))
     logger.info("[Quantuis] Coin monitoring task started (15-min interval)")
@@ -734,26 +778,17 @@ async def lifespan(app: FastAPI):
 
     yield
 
-    if monitoring_task is not None:
-        monitoring_task.cancel()
-        try:
-            await monitoring_task
-        except asyncio.CancelledError:
-            pass
-
-    if learning_task is not None:
-        learning_task.cancel()
-        try:
-            await learning_task
-        except asyncio.CancelledError:
-            pass
-
-    if position_monitor_task is not None:
-        position_monitor_task.cancel()
-        try:
-            await position_monitor_task
-        except asyncio.CancelledError:
-            pass
+    for task_ref, name in (
+        (monitoring_task, "monitoring"),
+        (learning_task, "learning"),
+        (position_monitor_task, "position_monitoring"),
+    ):
+        if task_ref is not None and not task_ref.done():
+            task_ref.cancel()
+            try:
+                await task_ref
+            except asyncio.CancelledError:
+                pass
 
     if feedback_engine is not None:
         feedback_engine.stop()
@@ -874,8 +909,9 @@ def _run_pipeline_sync(config: dict) -> None:
 
     for tf, df_raw in raw_data.items():
         logger.info(f"\n[PROCESS] Memproses timeframe: {tf}")
-        df = add_all_indicators(df_raw)
+        df = add_all_indicators(df_raw.lazy())
         df = merge_market_data(df, {})
+        df = df.collect()
         pipeline = MLPipeline(scaler_type=config["ml"]["scaler_type"])
         target_type = config.get("target", {}).get("type", "binary")
         df = pipeline.define_target(df, forward_periods=config["ml"]["forward_periods"], target_type=target_type)
@@ -884,7 +920,7 @@ def _run_pipeline_sync(config: dict) -> None:
         if df.is_empty():
             continue
 
-        features, feature_cols = pipeline.prepare_features(df, feature_cols=config["ml"]["feature_cols"])
+        features, _feature_cols = pipeline.prepare_features(df, feature_cols=config["ml"]["feature_cols"])
         targets = df.select("target").to_numpy().flatten()
 
         if len(features) <= time_steps:
@@ -902,8 +938,8 @@ def _run_pipeline_sync(config: dict) -> None:
         if len(scaled_train) <= time_steps or len(scaled_test) <= time_steps:
             continue
 
-        X_train, y_train = pipeline.create_sequences(scaled_train, targets_train_raw, time_steps=time_steps)
-        X_test, y_test = pipeline.create_sequences(scaled_test, targets_test_raw, time_steps=time_steps)
+        X_train, _y_train = pipeline.create_sequences(scaled_train, targets_train_raw, time_steps=time_steps)
+        X_test, _y_test = pipeline.create_sequences(scaled_test, targets_test_raw, time_steps=time_steps)
 
         if len(X_train) == 0 or len(X_test) == 0:
             continue
@@ -917,11 +953,31 @@ def _run_pipeline_sync(config: dict) -> None:
         else:
             model = create_model(model_type=model_type, input_size=input_size).to(device)
 
-        model.eval()
-        with torch.no_grad():
-            x_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
-            logits = model(x_test_tensor)
-            preds = torch.sigmoid(logits).cpu().numpy().flatten()
+        # Run inference via Celery
+        if celery_app is not None:
+            task = celery_app.send_task(
+                "inference.run",
+                args=[
+                    "models/best_weights.pth",
+                    model_type if model_type != "ensemble" else "lstm",
+                    input_size,
+                    X_test.tolist(),
+                    str(device),
+                ],
+                queue="inference",
+            )
+            try:
+                preds_list = task.get(timeout=config.get("task_queue", {}).get("timeout", 120))
+                preds = np.array(preds_list, dtype=np.float32)
+            except Exception as e:
+                logger.error(f"Inference task failed: {e}")
+                continue
+        else:
+            model.eval()
+            with torch.no_grad():
+                x_test_tensor = torch.tensor(X_test, dtype=torch.float32).to(device)
+                logits = model(x_test_tensor)
+                preds = torch.sigmoid(logits).cpu().numpy().flatten()
 
         result_df = df.tail(len(preds)).with_columns(pl.Series("prob", preds))
 
