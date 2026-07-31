@@ -1,0 +1,56 @@
+data:
+  exchange_id: "idx"
+  symbols:
+    - "IHSG"
+    - "LQ45"
+    - "IDX30"
+  yfinance_ticker:
+    - "^JKSE"
+    - "HMSP.JK"
+    - "IHSG.JK"
+  yfinance_period: "5y"
+
+trading:
+  training_schedule:
+    day: "saturday"
+    time: "02:00"
+  market_hours:
+    enabled: true
+    timezone: "Asia/Jakarta"
+    open_time: "08:00"
+    close_time: "17:00"
+
+telegram_bot:
+  enabled: false
+  groups: []
+
+ml:
+  feature_cols:
+    - close
+    - volume
+    - ema_20
+    - ema_50
+    - bb_width
+    - rsi
+    - stoch_k
+    - stoch_d
+    - atr
+    - macd_hist
+    - tick_imbalance
+    - trade_velocity
+    - spread_dynamics
+    - volatility
+    - autocorrelation
+    - returns_1d
+    - returns_5d
+    - vwap
+    - vwap_deviation
+    - obv
+    - obv_change
+    - volume_spike
+    - volume_spike_flag
+    - regime_trending
+    - adx
+    - bid_ask_imbalance
+    - pe_ratio
+    - pbv_ratio

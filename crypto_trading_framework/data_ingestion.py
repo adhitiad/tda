@@ -1,5 +1,7 @@
+from typing import Any
+
 import asyncio
-from datetime import datetime
+from datetime import datetime, UTC
 
 import ccxt.async_support as ccxt_async
 import pandas as pd
@@ -17,12 +19,14 @@ try:
         upsert_ohlcv_dataframe,
     )
     from crypto_trading_framework.db.redis_cache import get_redis_cache
+
     DB_AVAILABLE = True
 except ImportError:
     DB_AVAILABLE = False
 
 try:
     from crypto_trading_framework.core.validation import create_validator_from_config
+
     VALIDATION_AVAILABLE = True
 except ImportError:
     VALIDATION_AVAILABLE = False
@@ -46,18 +50,20 @@ class DataIngestion:
         self.symbol = symbol
         self.exchange = getattr(ccxt_async, exchange_id)()
 
-    async def fetch_ohlcv_async(
-        self, timeframe: str, limit: int = 2000
-    ) -> pl.DataFrame | None:
+    async def fetch_ohlcv_async(self, timeframe: str, limit: int = 2000) -> pl.DataFrame | None:
         try:
             all_ohlcv = []
-            tf_ms = self.exchange.parse_timeframe(timeframe) * 1000 if hasattr(self.exchange, "parse_timeframe") else 60000
+            tf_ms = (
+                self.exchange.parse_timeframe(timeframe) * 1000 if hasattr(self.exchange, "parse_timeframe") else 60000
+            )
             now = self.exchange.milliseconds()
             since = max(0, now - (limit * tf_ms))
             fetch_limit = 300
 
             while len(all_ohlcv) < limit:
-                batch = await self.exchange.fetch_ohlcv(self.symbol, timeframe=timeframe, since=since, limit=fetch_limit)
+                batch = await self.exchange.fetch_ohlcv(
+                    self.symbol, timeframe=timeframe, since=since, limit=fetch_limit
+                )
                 if not batch:
                     break
                 since = batch[-1][0] + 1
@@ -77,9 +83,7 @@ class DataIngestion:
                 orient="row",
             )
             df = df.unique(subset=["timestamp"]).sort("timestamp")
-            df = df.with_columns(
-                pl.col("timestamp").cast(pl.Datetime("ms"))
-            )
+            df = df.with_columns(pl.col("timestamp").cast(pl.Datetime("ms")))
             return df
         except Exception as e:
             logger.error(f"Gagal fetch {timeframe}: {e}")
@@ -119,16 +123,18 @@ class DataIngestion:
             spread = best_ask - best_bid
             spread_pct = spread / best_bid if best_bid > 0.0 else 0.0
 
-            return pl.DataFrame({
-                "timestamp": [pl.lit(datetime.now())],
-                "bid_ask_imbalance": [imbalance],
-                "spread": [spread],
-                "spread_pct": [spread_pct],
-                "bid_total": [bid_total],
-                "ask_total": [ask_total],
-                "best_bid": [best_bid],
-                "best_ask": [best_ask],
-            })
+            return pl.DataFrame(
+                {
+                    "timestamp": [pl.lit(datetime.now())],
+                    "bid_ask_imbalance": [imbalance],
+                    "spread": [spread],
+                    "spread_pct": [spread_pct],
+                    "bid_total": [bid_total],
+                    "ask_total": [ask_total],
+                    "best_bid": [best_bid],
+                    "best_ask": [best_ask],
+                }
+            )
         except Exception as e:
             logger.error(f"Gagal fetch orderbook: {e}")
             return None
@@ -137,10 +143,12 @@ class DataIngestion:
         try:
             if hasattr(self.exchange, "fetch_funding_rate"):
                 funding = await self.exchange.fetch_funding_rate(self.symbol)
-                return pl.DataFrame({
-                    "timestamp": [pl.lit(datetime.now())],
-                    "funding_rate": [funding.get("fundingRate", 0.0)],
-                })
+                return pl.DataFrame(
+                    {
+                        "timestamp": [pl.lit(datetime.now())],
+                        "funding_rate": [funding.get("fundingRate", 0.0)],
+                    }
+                )
         except Exception as e:
             logger.error(f"Gagal fetch funding rate: {e}")
         return None
@@ -149,10 +157,12 @@ class DataIngestion:
         try:
             if hasattr(self.exchange, "fetch_open_interest"):
                 oi = await self.exchange.fetch_open_interest(self.symbol)
-                return pl.DataFrame({
-                    "timestamp": [pl.lit(datetime.now())],
-                    "open_interest": [oi.get("openInterest", 0.0)],
-                })
+                return pl.DataFrame(
+                    {
+                        "timestamp": [pl.lit(datetime.now())],
+                        "open_interest": [oi.get("openInterest", 0.0)],
+                    }
+                )
         except Exception as e:
             logger.error(f"Gagal fetch open interest: {e}")
         return None
@@ -174,9 +184,7 @@ class DataIngestion:
 
         return data
 
-    def fetch_yfinance(
-        self, ticker: str = "BTC-USD", period: str = "1y", interval: str = "1h"
-    ) -> pl.DataFrame | None:
+    def fetch_yfinance(self, ticker: str = "BTC-USD", period: str = "1y", interval: str = "1h") -> pl.DataFrame | None:
         try:
             ticker_obj = yf.Ticker(ticker)
             hist = ticker_obj.history(period=period, interval=interval)
@@ -192,7 +200,13 @@ class DataIngestion:
             elif "Date" in df.columns:
                 rename_map["Date"] = "timestamp"
 
-            for old, new in [("Open", "open"), ("High", "high"), ("Low", "low"), ("Close", "close"), ("Volume", "volume")]:
+            for old, new in [
+                ("Open", "open"),
+                ("High", "high"),
+                ("Low", "low"),
+                ("Close", "close"),
+                ("Volume", "volume"),
+            ]:
                 if old in df.columns:
                     rename_map[old] = new
 
@@ -308,6 +322,7 @@ class DataIngestion:
 
         try:
             from crypto_trading_framework.db.database import query_ohlcv
+
             pdf = query_ohlcv(
                 symbol=self._normalize_symbol(),
                 timeframe=timeframe,
@@ -400,3 +415,90 @@ class DataIngestion:
                 cache.cache_ohlcv(symbol, interval, df.to_pandas())
                 logger.info(f"[Ingest] Persisted {rows} rows for {ticker} {interval}")
         return df
+
+    async def fetch_multi_symbol_ccxtpro(
+        self,
+        symbols: list[str],
+        timeframe: str = "m15",
+        limit: int = 2000,
+    ) -> dict[str, pl.DataFrame | None]:
+        """Fetch OHLCV for multiple symbols concurrently using ccxt.pro.
+
+        Requires ccxt.pro to be installed: pip install ccxt.pro
+
+        :param symbols: List of CCXT-formatted symbols
+        :param timeframe: Candle timeframe
+        :param limit: Maximum candles per symbol
+        :return: Dict mapping symbol to DataFrame (or None on failure)
+        """
+        try:
+            import ccxt.pro as ccxt_pro
+        except ImportError:
+            logger.warning(
+                "[ccxt.pro] Not installed. Install with: pip install ccxt.pro. Falling back to async ccxt fetching."
+            )
+            results: dict[str, pl.DataFrame | None] = {}
+            for symbol in symbols:
+                ingestion = DataIngestion(
+                    exchange_id=self.exchange_id,
+                    symbol=symbol,
+                )
+                try:
+                    df = await ingestion.fetch_ohlcv_async(timeframe, limit=limit)
+                    results[symbol] = df
+                except Exception as e:
+                    logger.error(f"[ccxt.pro] Failed fetching {symbol}: {e}")
+                    results[symbol] = None
+                finally:
+                    await ingestion.close()
+            return results
+
+        exchange = getattr(ccxt_pro, self.exchange_id)(
+            {
+                "enableRateLimit": True,
+            }
+        )
+
+        results = {}
+        try:
+            tasks = []
+            for symbol in symbols:
+                tasks.append(self._fetch_symbol_ccxtpro(exchange, symbol, timeframe, limit))
+            resolved = await asyncio.gather(*tasks, return_exceptions=True)
+            for symbol, result in zip(symbols, resolved):
+                if isinstance(result, Exception):
+                    logger.error(f"[ccxt.pro] Error fetching {symbol}: {result}")
+                    results[symbol] = None
+                else:
+                    results[symbol] = result
+        finally:
+            await exchange.close()
+
+        return results
+
+    async def _fetch_symbol_ccxtpro(
+        self,
+        exchange: Any,
+        symbol: str,
+        timeframe: str,
+        limit: int,
+    ) -> pl.DataFrame | None:
+        """Fetch OHLCV for a single symbol using ccxt.pro."""
+        try:
+            ohlcv = await exchange.watch_ohlcv(symbol, timeframe, limit=limit)
+            if not ohlcv or len(ohlcv) == 0:
+                return None
+            df = pl.DataFrame(
+                {
+                    "timestamp": [datetime.fromtimestamp(ts / 1000, tz=UTC) for ts, _, _, _, _, _ in ohlcv],
+                    "open": [c[1] for c in ohlcv],
+                    "high": [c[2] for c in ohlcv],
+                    "low": [c[3] for c in ohlcv],
+                    "close": [c[4] for c in ohlcv],
+                    "volume": [c[5] for c in ohlcv],
+                }
+            )
+            return df
+        except Exception as e:
+            logger.error(f"[ccxt.pro] Failed to fetch {symbol}: {e}")
+            return None

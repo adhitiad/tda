@@ -1,0 +1,34 @@
+data:
+  exchange_id: "okx"
+  symbols:
+    - "BTC/USDT:USDT"
+    - "ETH/USDT:USDT"
+    - "BNB/USDT:USDT"
+    - "SOL/USDT:USDT"
+    - "XRP/USDT:USDT"
+    - "DOGE/USDT:USDT"
+    - "ADA/USDT:USDT"
+    - "AVAX/USDT:USDT"
+    - "DOT/USDT:USDT"
+    - "MATIC/USDT:USDT"
+  yfinance_ticker:
+    - "BTC-USD"
+    - "ETH-USD"
+    - "BNB-USD"
+    - "SOL-USD"
+    - "XRP-USD"
+    - "DOGE-USD"
+    - "ADA-USD"
+    - "AVAX-USD"
+    - "DOT-USD"
+    - "MATIC-USD"
+  yfinance_period: "10y"
+
+trading:
+  training_schedule:
+    day: "sunday"
+    time: "02:00"
+
+telegram_bot:
+  enabled: true
+  groups: []

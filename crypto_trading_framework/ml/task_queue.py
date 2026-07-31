@@ -26,6 +26,7 @@ class TaskQueueConfig:
     enabled: bool = True
     max_concurrency: int = 4
     timeout: float = 120.0
+    celery: dict | None = None
 
 
 class BoundedTaskPool:

@@ -1,0 +1,300 @@
+data:
+  exchange_id: "okx"
+  symbols:
+    - "BTC/USDT:USDT"
+    - "ETH/USDT:USDT"
+    - "BNB/USDT:USDT"
+    - "SOL/USDT:USDT"
+    - "XRP/USDT:USDT"
+    - "DOGE/USDT:USDT"
+    - "ADA/USDT:USDT"
+    - "AVAX/USDT:USDT"
+    - "DOT/USDT:USDT"
+    - "MATIC/USDT:USDT"
+  yfinance_ticker:
+    - "BTC-USD"
+    - "ETH-USD"
+    - "BNB-USD"
+    - "SOL-USD"
+    - "XRP-USD"
+    - "DOGE-USD"
+    - "ADA-USD"
+    - "AVAX-USD"
+    - "DOT-USD"
+    - "MATIC-USD"
+  yfinance_period: "10y"
+  timeframes:
+    - m15
+    - m30
+    - h1
+    - h4
+    - d1
+  lookback: 2000
+  fallback_enabled: true
+
+websocket:
+  enabled: false
+  buffer_size: 100
+  buffer_interval: 5.0
+
+market_data:
+  orderbook:
+    enabled: true
+    limit: 100
+  funding_rate:
+    enabled: true
+  open_interest:
+    enabled: true
+
+trading:
+  dry_run: true
+  auto_start: true
+  training_schedule:
+    day: "sunday"
+    time: "02:00"
+  max_symbols: 10
+
+indicators:
+  ema_periods: [20, 50, 200]
+  bb_period: 20
+  bb_multiplier: 2.0
+  rsi_period: 14
+  stoch_k_period: 14
+  stoch_d_period: 3
+  stoch_smooth_k: 3
+  atr_period: 14
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  ichimoku_tenkan: 9
+  ichimoku_kijun: 26
+  ichimoku_senkou_span_b: 52
+  volume_profile_bins: 50
+  tick_imbalance_window: 20
+  trade_velocity_window: 10
+  spread_dynamics_window: 5
+
+ml:
+  scaler_type: "minmax"
+  time_steps: 60
+  forward_periods: 10
+  test_size: 0.2
+  feature_cols:
+    - close
+    - volume
+    - ema_20
+    - ema_50
+    - bb_width
+    - rsi
+    - stoch_k
+    - stoch_d
+    - atr
+    - macd_hist
+    - tick_imbalance
+    - trade_velocity
+    - spread_dynamics
+    - volatility
+    - autocorrelation
+    - returns_1d
+    - returns_5d
+    - vwap
+    - vwap_deviation
+    - obv
+    - obv_change
+    - volume_spike
+    - volume_spike_flag
+    - regime_trending
+    - adx
+    - bid_ask_imbalance
+    - funding_rate
+    - open_interest
+
+model:
+  type: "ensemble"
+  hidden_size: 64
+  num_layers: 2
+  dropout: 0.3
+  fc_hidden: 32
+  epochs: 100
+  learning_rate: 0.001
+  optimizer: "adam"
+  loss: "bce"
+  class_weight_method: "balanced"
+  checkpoint_dir: "models"
+  save_best_only: true
+
+ensemble:
+  enabled: true
+  models:
+    - type: "lstm"
+      weight: 0.5
+    - type: "rf"
+      weight: 0.3
+    - type: "xgb"
+      weight: 0.2
+  voting: "soft"
+  stacking_meta_model: "logistic"
+
+target:
+  type: "binary"
+  forward_periods: 10
+  atr_multiplier: 1.5
+  regime_lookback: 20
+  regime_threshold: 0.5
+
+multi_timeframe:
+  enabled: false
+  primary_timeframe: "m15"
+  auxiliary_timeframes: ["m30", "h1", "h4", "d1"]
+
+hyperparameter_tuning:
+  enabled: true
+  n_trials: 10
+  param_grid:
+    hidden_size: [32, 64, 128]
+    num_layers: [1, 2]
+    dropout: [0.2, 0.3, 0.4]
+    lr: [0.001, 0.0005, 0.0001]
+    epochs: [50, 100, 150]
+
+backtest:
+  tp_pct: 0.03
+  sl_pct: 0.015
+  initial_capital: 10000.0
+  position_size_method: "atr"
+  atr_multiplier: 1.0
+  max_risk_per_trade: 0.02
+  trailing_stop_enabled: true
+  trailing_stop_activation_pct: 0.015
+  trailing_stop_distance_pct: 0.01
+  max_drawdown_pct: 0.20
+  transaction_fee_pct: 0.001
+  slippage_pct: 0.0005
+  forward_periods: 20
+
+walk_forward:
+  enabled: true
+  n_splits: 5
+  train_size: null
+  test_size: 50
+  embargo: 15
+  min_train_size: 100
+  expanding: true
+
+signal:
+  threshold: 0.55
+  tp_pct: 0.03
+  sl_pct: 0.015
+  min_adx: 25.0
+  require_volume_spike: false
+  min_confirmations: 2
+  use_rule_fallback: true
+  min_confluences: 3
+
+logging:
+  log_file: "logs/main.log"
+  log_level: "INFO"
+  format: "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s"
+
+paths:
+  data_dir: "data"
+  models_dir: "models"
+  logs_dir: "logs"
+  backtest_dir: "backtests"
+  config_file: "config/base.yaml"
+
+database:
+  url: ""
+  pool_size: 5
+  max_overflow: 10
+  pool_recycle: 1800
+  echo: false
+
+validation:
+  enabled: true
+  max_price_change_pct: 0.5
+  allow_gaps: false
+  min_volume: 0.0
+
+alerting:
+  enabled: true
+  min_level: "WARNING"
+  telegram:
+    enabled: false
+    bot_token: ""
+    chat_id: ""
+  discord:
+    enabled: false
+    webhook_url: ""
+  email:
+    enabled: false
+    smtp_host: ""
+    smtp_port: 465
+    username: ""
+    password: ""
+    from_addr: ""
+    to_addrs: []
+
+api:
+  enabled: false
+  host: "127.0.0.1"
+  port: 8000
+  api_key: ""
+  allowed_origins:
+    - "*"
+
+feature_store:
+  enabled: true
+  cache_ttl: 60
+  compute_on_ingest: true
+
+model_registry:
+  enabled: true
+  registry_dir: "models/registry"
+  active_version: "latest"
+  canary:
+    enabled: false
+    traffic_percent: 10
+
+task_queue:
+  enabled: true
+  max_concurrency: 2
+  timeout: 120.0
+
+drift_detection:
+  enabled: true
+  prediction_window: 100
+  feature_window: 100
+  ks_threshold: 0.3
+  feature_z_threshold: 3.0
+  alert_cooldown: 10
+
+portfolio_risk:
+  enabled: true
+  max_portfolio_exposure: 0.5
+  max_correlation_exposure: 0.3
+  max_portfolio_drawdown_pct: 0.25
+  lookback_correlation: 100
+  risk_per_trade: 0.02
+  rebalance_threshold: 0.1
+
+risk_management:
+  atr_multiplier_sl: 1.5
+  atr_multiplier_tp: 2.0
+  trailing_stop_atr_multiple: 1.0
+  kelly_enabled: true
+  kelly_fraction: 0.5
+  max_risk_per_trade: 0.05
+
+telegram_bot:
+  enabled: true
+  bot_token: ""
+  polling_interval: 1.0
+  max_retries: 3
+  retry_delay_seconds: 5
+  groups: []
+  signal:
+    include_disclaimer: true
+    disclaimer_text: "⚠ Ini adalah analisis teknikal, bukan nasihat investasi. Gunakan dengan risiko Anda sendiri."
+    timezone: "Asia/Jakarta"
+    timestamp_format: "%Y-%m-%d %H:%M:%S WIB"

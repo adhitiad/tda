@@ -19,6 +19,7 @@ import pandas as pd
 from redis import Redis
 from redis.connection import ConnectionPool
 
+
 from crypto_trading_framework.core.logging import get_logger
 
 logger = get_logger("redis_cache")
@@ -77,7 +78,7 @@ def _build_redis_url_from_env() -> str:
 class RedisCache:
     def __init__(self, url: str | None = None, decode_responses: bool = True):
         self.url = url or _build_redis_url_from_env()
-        self._pool = ConnectionPool.from_url(self.url, decode_responses=decode_responses)
+        self._pool = ConnectionPool.from_url(self.url, decode_responses=decode_responses, health_check_interval=0)
         self._client = Redis(connection_pool=self._pool)
         self._default_ttl = int(os.getenv("REDIS_DEFAULT_TTL", "3600"))
 

@@ -8,7 +8,7 @@ to feed the Streamlit dashboard.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from crypto_trading_framework.db.ledger import Ledger
 
 try:
     from redis.exceptions import RedisError
+
     REDIS_ERROR_AVAILABLE = True
 except ImportError:
     REDIS_ERROR_AVAILABLE = False
@@ -34,12 +35,14 @@ else:
 
 try:
     from crypto_trading_framework.db.redis_cache import get_redis_cache
+
     REDIS_AVAILABLE = True
 except ImportError:
     REDIS_AVAILABLE = False
 
 try:
     from crypto_trading_framework.ml.feature_store import get_features
+
     FEATURE_STORE_AVAILABLE = True
 except ImportError:
     FEATURE_STORE_AVAILABLE = False
@@ -49,6 +52,7 @@ try:
         ModelRegistry,
         ModelRegistryConfig,
     )
+
     REGISTRY_AVAILABLE = True
 except ImportError:
     REGISTRY_AVAILABLE = False
@@ -64,9 +68,7 @@ class ObservabilityDataProvider:
         if REGISTRY_AVAILABLE:
             try:
                 reg_cfg = ModelRegistryConfig(
-                    registry_dir=str(
-                        Path(self.config.get("paths", {}).get("models_dir", "models")) / "registry"
-                    )
+                    registry_dir=str(Path(self.config.get("paths", {}).get("models_dir", "models")) / "registry")
                 )
                 self._registry = ModelRegistry(reg_cfg)
             except _DATA_ERRORS as exc:
@@ -116,7 +118,7 @@ class ObservabilityDataProvider:
                         sig = data if isinstance(data, dict) else {}
                         sig.setdefault("symbol", symbol)
                         sig.setdefault("timeframe", timeframe)
-                        sig.setdefault("fetched_at", datetime.now(timezone.utc).isoformat())
+                        sig.setdefault("fetched_at", datetime.now(UTC).isoformat())
                         signals.append(sig)
         except _REDIS_ERRORS as exc:
             logger.debug("[Observability] Gagal baca sinyal dari Redis: %s", exc)
@@ -215,6 +217,7 @@ class ObservabilityDataProvider:
             from sqlalchemy import text
 
             from crypto_trading_framework.db.database import get_engine
+
             engine = get_engine()
             with engine.connect() as conn:
                 conn.execute(text("SELECT 1"))
